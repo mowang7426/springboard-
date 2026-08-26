@@ -4,6 +4,9 @@
         Bundles = (
             "com.apple.springboard"
         );
+        Executables = (
+            "thermalmonitord"
+        );
     };
 }
 
