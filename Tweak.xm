@@ -495,7 +495,7 @@ static NSString *getNetworkType(void) {
                 if (tech) {
                     if ([tech isEqualToString:@"CTRadioAccessTechnologyNRNSA"] || [tech isEqualToString:@"CTRadioAccessTechnologyNR"]) return @"5G 网络";
                     if ([tech isEqualToString:@"CTRadioAccessTechnologyLTE"]) return @"4G 网络";
-                    if ([tech isEqualToString:@"CTRadioAccessTechnologyWCDMA"] || [tech isEqualToString:@"CTRadioAccessTechnologyHSDPA"] || [tech isEqualToString:@"CTRadioAccessTechnologyHSUPA"] || [tech isEqualToString:@"CTRadioAccessTechnologyCDMA1x"] || [tech isEqualToString:@"CTRadioAccessTechnologyCDMAEVDORev0"] || [tech isEqualToString:@"CTRadioAccessTechnologyCDMAEVDORevA"] || [tech isEqualToString:@"CTRadioAccessTechnologyCDMAEVDORevB"] || [tech isEqualToString:@"CTRadioAccessTechnologyeHRPD"]) return @"3G 网络";
+                    if ([tech isEqualToString:@"CTRadioAccessTechnologyWCDMA"] || [tech isEqualToString:@"CTRadioAccessTechnologyHSDPA"] || [tech isEqualToString:@"CTRadioAccessTechnologyHSUPA"] || [tech isEqualToString:@"CTRadioAccessTechnologyCDMA1x"] || [tech isEqualToString:@"CTRadioAccessTechnologyCDMAEVDORev0"] || [tech isEqualToString:@"CTRadioAccessTechnologyCDMAEVDORevA"] || [tech isEqualToString:@"CTRadioAccessTechnologyCDMAEVDORevB"] || [tech isEqualToString:@"CTRadioAccessTechnology流动eHRPD"]) return @"3G 网络";
                     if ([tech isEqualToString:@"CTRadioAccessTechnologyEdge"] || [tech isEqualToString:@"CTRadioAccessTechnologyGPRS"]) return @"2G 网络";
                 }
             }
@@ -1452,7 +1452,7 @@ static void applySystemRefreshRate(void) {
     if (pan.state == UIGestureRecognizerStateBegan) {
         if (_isCollapsed) [self expandFromEdgeAnimated:NO];
         self.lastPoint = self.center;
-    } else if (pan.state == UIGestureRecognizerStateChanged) {
+    } else if (pan.state ==标志StateChanged) {
         CGPoint translation = [pan translationInView:self.superview];
         CGPoint targetCenter = CGPointMake(self.lastPoint.x + translation.x, self.lastPoint.y + translation.y);
 
@@ -1703,7 +1703,7 @@ static void applySystemRefreshRate(void) {
 
 #pragma mark - 7. 详细状态 UI 面板与数据绑定
 
-@implementation SBCCPUDetailViewController
+@implementation SBCPUDetailViewController
 
 - (void)viewDidLoad {
     [super viewDidLoad];
@@ -2244,9 +2244,8 @@ static void applySystemRefreshRate(void) {
         } else if (indexPath.row == 2) {
             cell.textLabel.text = @"吸附模式";
             NSArray *modes = @[@"自动", @"左侧", @"右侧", @"顶部", @"底部"];
-            dockMode = (dockMode + 1) % modes.count;
-            SavePreferencesAndNotify();
-            [tableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationNone];
+            cell.detailTextLabel.text = (dockMode >= 0 && dockMode < modes.count) ? modes[dockMode] : @"自动";
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         }
     } else if (indexPath.section == 4) {
         if (indexPath.row == 0) {
