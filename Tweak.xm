@@ -69,7 +69,7 @@ typedef struct {
 - (UIInterfaceOrientation)activeInterfaceOrientation;
 @end
 
-@class SBCPUDetailViewController;
+@class SBCCPUDetailViewController;
 
 @interface SBCPUFPSHelper : NSObject
 + (instancetype)sharedInstance;
@@ -971,7 +971,7 @@ static void applySystemRefreshRate(void) {
 
 #pragma mark - 6. 所有的 Objective-C 类实现区块
 
-@implementation SBCCPUFPSHelper {
+@implementation SBCPUFPSHelper {
     CADisplayLink *_displayLink;
     CFTimeInterval _lastTimestamp;
     NSInteger _frameCount;
@@ -2839,3 +2839,4 @@ static BOOL InsulationHookMethod(Class cls, SEL selector, IMP replacement, IMP *
         }
     }
 }
+
