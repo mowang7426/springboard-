@@ -252,10 +252,12 @@ static double getSystemCPUUsage(void);
 static double getRealCPUFrequency(void);
 static void setHardwareChargingInhibit(BOOL inhibit);
 static void applyDirectHardwarePowerLevel(NSInteger mode);
+static void applySystemPowerSaver(NSInteger mode);
 static NSString *getNetworkType(void);
 
 // 🟢 跨进程通知发送器 (由 SpringBoard 向内核广播)
 static void SendCPUModeToDaemon(NSInteger mode) {
+    applySystemPowerSaver(mode);
     applyDirectHardwarePowerLevel(mode);
     int token;
     if (notify_register_check(NOTIFY_CPU_MODE, &token) == NOTIFY_STATUS_OK) {
@@ -266,6 +268,21 @@ static void SendCPUModeToDaemon(NSInteger mode) {
 }
 
 #pragma mark - 5. 底层 C 函数具体实现与 CFPreferences 全局引擎
+
+// 🟢 [核心新增] 系统级底层电源模式切换（令 CPU-X 与系统同时检测到真实降频）
+static void applySystemPowerSaver(NSInteger mode) {
+    if ([[NSProcessInfo processInfo].processName isEqualToString:@"SpringBoard"]) {
+        @try {
+            Class saverClass = NSClassFromString(@"_CDBatterySaver");
+            if (saverClass && [saverClass respondsToSelector:@selector(batterySaver)]) {
+                id saver = [saverClass performSelector:@selector(batterySaver)];
+                if (saver && [saver respondsToSelector:@selector(setPowerMode:error:)]) {
+                    [saver setPowerMode:(mode == 1 ? 1 : 0) error:nil];
+                }
+            }
+        } @catch (NSException *e) {}
+    }
+}
 
 // 🟢 [核心新增] IOKit 内核电源树直通穿透降频
 static void applyDirectHardwarePowerLevel(NSInteger mode) {
@@ -654,7 +671,7 @@ static double getSystemCPUUsage(void) {
     return ((double)(user + system + nice) / (double)total) * 100.0;
 }
 
-// 🟢 [纯真实硬件周期计算] 不带任何人为假设，由硬件真实执行速度实时计算
+// 🟢 [纯真实硬件周期计算] 由硬件真实执行速度实时计算
 static double getRealCPUFrequency(void) {
     static mach_timebase_info_data_t timebase;
     static dispatch_once_t onceToken;
@@ -1786,7 +1803,7 @@ static void applySystemRefreshRate(void) {
 
 #pragma mark - 7. 详细状态 UI 面板与数据绑定
 
-@implementation SBCCPUDetailViewController
+@implementation SBCPUDetailViewController
 
 - (void)viewDidLoad {
     [super viewDidLoad];
@@ -2390,7 +2407,6 @@ static void applySystemRefreshRate(void) {
             UISlider *slider = [[UISlider alloc] initWithFrame:CGRectMake(0,0,130,30)];
             slider.minimumValue = 30.0; slider.maximumValue = 45.0; slider.value = smartChargeLimitTemp;
             [slider addTarget:self action:@selector(changeChargeTempSlider:) forControlEvents:UIControlEventValueChanged];
-            cell.accessoryView = slider;
             cell.detailTextLabel.text = [NSString stringWithFormat:@"%.1f°C", smartChargeLimitTemp];
         }
     } else if (indexPath.section == 7) {
