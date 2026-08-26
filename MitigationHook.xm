@@ -18,28 +18,47 @@ static __weak id activeMitigationController = nil;
 - (void)updateCPU;
 @end
 
-// 动态触发硬件调度器拉平频率
+// 🟢 严格参考 Insulation 原版逻辑：主动应用并双重写入
 static void applyCurrentMitigationState(void) {
     if (!activeMitigationController) return;
     @try {
-        if (insulationCpuMode == 1) { // 模拟低电锁低频 (Level 2)
+        if (insulationCpuMode == 1) { // 模拟低功耗：锁 CPU Level 2
             if ([activeMitigationController respondsToSelector:@selector(setPowerSaveActive:)]) {
                 [activeMitigationController setPowerSaveActive:YES];
             }
             if ([activeMitigationController respondsToSelector:@selector(setCPULevel:)]) {
                 [activeMitigationController setCPULevel:2];
             }
-        } else if (insulationCpuMode == 2) { // 满血解除降频 (Level 0)
+            if ([activeMitigationController respondsToSelector:@selector(updateCPU)]) {
+                [activeMitigationController updateCPU];
+            }
+            // 双重写入，防止硬件调度器回调覆盖
+            if ([activeMitigationController respondsToSelector:@selector(setPowerSaveActive:)]) {
+                [activeMitigationController setPowerSaveActive:YES];
+            }
+            if ([activeMitigationController respondsToSelector:@selector(setCPULevel:)]) {
+                [activeMitigationController setCPULevel:2];
+            }
+        } else if (insulationCpuMode == 2) { // 满血防降频：强制 0
             if ([activeMitigationController respondsToSelector:@selector(setPowerSaveActive:)]) {
                 [activeMitigationController setPowerSaveActive:NO];
             }
             if ([activeMitigationController respondsToSelector:@selector(setCPULevel:)]) {
                 [activeMitigationController setCPULevel:0];
             }
-        }
-        
-        if ([activeMitigationController respondsToSelector:@selector(updateCPU)]) {
-            [activeMitigationController updateCPU];
+            if ([activeMitigationController respondsToSelector:@selector(updateCPU)]) {
+                [activeMitigationController updateCPU];
+            }
+        } else if (insulationCpuMode == 0) { // 原生模式：恢复默认
+            if ([activeMitigationController respondsToSelector:@selector(setPowerSaveActive:)]) {
+                [activeMitigationController setPowerSaveActive:NO];
+            }
+            if ([activeMitigationController respondsToSelector:@selector(setCPULevel:)]) {
+                [activeMitigationController setCPULevel:0];
+            }
+            if ([activeMitigationController respondsToSelector:@selector(updateCPU)]) {
+                [activeMitigationController updateCPU];
+            }
         }
     } @catch (NSException *e) {}
 }
@@ -65,7 +84,7 @@ static void applyCurrentMitigationState(void) {
     %orig(active);
 }
 
-// 拦截系统降频级别 (无论系统设几级，低电模式强行压到 2，满血强压到 0)
+// 拦截系统降频级别 (低电模式强行压到 2，满血强压到 0)
 - (void)setCPULevel:(int)level {
     activeMitigationController = self;
     if (insulationCpuMode == 1) {
@@ -138,5 +157,4 @@ static void applyCurrentMitigationState(void) {
         });
     }
 }
-
 
