@@ -14,6 +14,7 @@
 #import <arpa/inet.h>
 #import <CoreMotion/CoreMotion.h>
 #import <notify.h>
+#import <objc/runtime.h>
 
 #ifndef kIOMainPortDefault
 #define kIOMainPortDefault kIOMasterPortDefault
@@ -57,6 +58,9 @@ typedef struct {
 @interface MitigationController : NSObject
 - (void)setPowerSaveActive:(BOOL)arg1;
 - (void)setCPULevel:(int)arg1;
+- (void)setCPULowPowerTarget:(int)arg1;
+- (void)setCPUPowerCeiling:(int)arg1 fromDecisionSource:(int)arg2;
+- (void)setCPUPowerZoneTarget:(int)arg1;
 - (void)updateCPU;
 @end
 
@@ -210,8 +214,8 @@ static CFAbsoluteTime lastNetSpeedTime = 0;
 static host_cpu_load_info_data_t prev_cpu_load;
 static BOOL has_prev_cpu_load = NO;
 
-static __weak MitigationController *sharedMitigationController = nil;
 static const int InsulationUnrestrictedPowerTarget = 65000;
+static __weak MitigationController *g_activeMitigationController = nil;
 
 #pragma mark - 4. 所有的底层 C 函数前置声明
 
@@ -248,8 +252,6 @@ static double getRealCPUFrequency(void);
 static void setHardwareChargingInhibit(BOOL inhibit);
 static NSString *getNetworkType(void);
 
-static void applyMitigationState(void);
-
 // 🟢 跨进程通知发送器 (由 SpringBoard 向内核广播)
 static void SendCPUModeToDaemon(NSInteger mode) {
     int token;
@@ -261,50 +263,6 @@ static void SendCPUModeToDaemon(NSInteger mode) {
 }
 
 #pragma mark - 5. 底层 C 函数具体实现与 CFPreferences 全局引擎
-
-static void applyMitigationState(void) {
-    if (!sharedMitigationController) return;
-    @try {
-        if (insulationCpuMode == 1) { // 模拟低电锁频 (Level 2)
-            if ([sharedMitigationController respondsToSelector:@selector(setPowerSaveActive:)]) {
-                [sharedMitigationController setPowerSaveActive:YES];
-            }
-            if ([sharedMitigationController respondsToSelector:@selector(setCPULevel:)]) {
-                [sharedMitigationController setCPULevel:2];
-            }
-            if ([sharedMitigationController respondsToSelector:@selector(updateCPU)]) {
-                [sharedMitigationController performSelector:@selector(updateCPU)];
-            }
-            // 双重写入，防覆盖
-            if ([sharedMitigationController respondsToSelector:@selector(setPowerSaveActive:)]) {
-                [sharedMitigationController setPowerSaveActive:YES];
-            }
-            if ([sharedMitigationController respondsToSelector:@selector(setCPULevel:)]) {
-                [sharedMitigationController setCPULevel:2];
-            }
-        } else if (insulationCpuMode == 2) { // 满血解除温控限制 (Level 0)
-            if ([sharedMitigationController respondsToSelector:@selector(setPowerSaveActive:)]) {
-                [sharedMitigationController setPowerSaveActive:NO];
-            }
-            if ([sharedMitigationController respondsToSelector:@selector(setCPULevel:)]) {
-                [sharedMitigationController setCPULevel:0];
-            }
-            if ([sharedMitigationController respondsToSelector:@selector(updateCPU)]) {
-                [sharedMitigationController performSelector:@selector(updateCPU)];
-            }
-        } else if (insulationCpuMode == 0) { // 原生模式
-            if ([sharedMitigationController respondsToSelector:@selector(setPowerSaveActive:)]) {
-                [sharedMitigationController setPowerSaveActive:NO];
-            }
-            if ([sharedMitigationController respondsToSelector:@selector(setCPULevel:)]) {
-                [sharedMitigationController setCPULevel:0];
-            }
-            if ([sharedMitigationController respondsToSelector:@selector(updateCPU)]) {
-                [sharedMitigationController performSelector:@selector(updateCPU)];
-            }
-        }
-    } @catch (NSException *e) {}
-}
 
 static DeviceSpec getDeviceSpec(void) {
     char machine[256] = {0};
@@ -2202,6 +2160,9 @@ static void applySystemRefreshRate(void) {
     if (section == 4) {
         return @"💡 功能说明：\n1. 强制 120Hz 高刷模式：通过底层硬件合成器与微像素渲染驱动，全局锁定 120Hz 满帧，彻底杜绝屏幕静止降频。\n2. 智能温控降频保护：开启时若检测到电池温度 ≥43°C 或系统过热警报将自动降频保护；关闭后解除温控限制，发热也强行保持 120Hz。";
     }
+    if (section == 5) {
+        return @"💡 模式说明：\n1. 模拟低电频率：将 CPU 降频等级强制锁死在 Level 2 状态，瞬时降温且绝对不被系统调度打断。\n2. 防止温控降频：无论发热多高均把 CPU 保持在 Level 0 满血状态，释放极限性能。";
+    }
     if (section == 6) {
         return @"💡 边充边玩黄金组合：开启高温智能断充后，一旦温度超过阈值，系统将物理切断电池充电改为直接由电源线供电（旁路供电）。配合 Insulation 防降频模块，可实现：大型游戏满帧不暗屏 + 电池不发热鼓包！";
     }
@@ -2302,9 +2263,8 @@ static void applySystemRefreshRate(void) {
         } else if (indexPath.row == 2) {
             cell.textLabel.text = @"吸附模式";
             NSArray *modes = @[@"自动", @"左侧", @"右侧", @"顶部", @"底部"];
-            dockMode = (dockMode + 1) % modes.count;
-            SavePreferencesAndNotify();
-            [tableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationNone];
+            cell.detailTextLabel.text = (dockMode >= 0 && dockMode < modes.count) ? modes[dockMode] : @"自动";
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         }
     } else if (indexPath.section == 4) {
         if (indexPath.row == 0) {
@@ -2644,61 +2604,118 @@ static void registerV160Observers(void) {
 }
 %end
 
-#pragma mark - 10. thermalmonitord 底层核心 Hook 组
+#pragma mark - 10. thermalmonitord 专用的 Insulation 原生 Runtime Hook 引擎
 
-%group MitigationHooks
+static void (*Orig_MitigationController_setPowerSaveActive)(id self, SEL _cmd, BOOL active);
+static void (*Orig_MitigationController_setCPULevel)(id self, SEL _cmd, int level);
+static void (*Orig_MitigationController_setCPULowPowerTarget)(id self, SEL _cmd, int power);
+static void (*Orig_MitigationController_setCPUPowerCeilingFromDecisionSource)(id self, SEL _cmd, int power, int source);
+static void (*Orig_MitigationController_setCPUPowerZoneTarget)(id self, SEL _cmd, int power);
 
-%hook MitigationController
-
-- (void)setPowerSaveActive:(BOOL)active {
-    sharedMitigationController = self;
-    if (insulationCpuMode == 2) {
-        %orig(NO);
-    } else if (insulationCpuMode == 1) {
-        %orig(YES);
-    } else {
-        %orig(active);
+static void Insulation_MitigationController_setPowerSaveActive(id self, SEL _cmd, BOOL active) {
+    g_activeMitigationController = self;
+    if (insulationCpuMode == 1) { // 模拟低电锁定
+        if (Orig_MitigationController_setPowerSaveActive) Orig_MitigationController_setPowerSaveActive(self, _cmd, YES);
+        return;
+    } else if (insulationCpuMode == 2) { // 满血放宽
+        if (Orig_MitigationController_setPowerSaveActive) Orig_MitigationController_setPowerSaveActive(self, _cmd, NO);
+        return;
     }
+    if (Orig_MitigationController_setPowerSaveActive) Orig_MitigationController_setPowerSaveActive(self, _cmd, active);
 }
 
-- (void)setCPULevel:(int)level {
-    sharedMitigationController = self;
-    if (insulationCpuMode == 2) {
-        %orig(0);
-    } else if (insulationCpuMode == 1) {
-        %orig(2); // 严格锁定低频
-    } else {
-        %orig(level);
+static void Insulation_MitigationController_setCPULevel(id self, SEL _cmd, int level) {
+    g_activeMitigationController = self;
+    if (insulationCpuMode == 1) { // 强行压死在 Level 2 低功耗
+        if (Orig_MitigationController_setCPULevel) Orig_MitigationController_setCPULevel(self, _cmd, 2);
+        return;
+    } else if (insulationCpuMode == 2) { // 强行拉满到 Level 0
+        if (Orig_MitigationController_setCPULevel) Orig_MitigationController_setCPULevel(self, _cmd, 0);
+        return;
     }
+    if (Orig_MitigationController_setCPULevel) Orig_MitigationController_setCPULevel(self, _cmd, level);
 }
 
-- (void)setCPULowPowerTarget:(int)power {
+static void Insulation_MitigationController_setCPULowPowerTarget(id self, SEL _cmd, int power) {
+    g_activeMitigationController = self;
     if (insulationCpuMode == 2) {
-        %orig(MAX(power, InsulationUnrestrictedPowerTarget));
-    } else {
-        %orig(power);
+        if (Orig_MitigationController_setCPULowPowerTarget) Orig_MitigationController_setCPULowPowerTarget(self, _cmd, MAX(power, InsulationUnrestrictedPowerTarget));
+        return;
     }
+    if (Orig_MitigationController_setCPULowPowerTarget) Orig_MitigationController_setCPULowPowerTarget(self, _cmd, power);
 }
 
-- (void)setCPUPowerCeiling:(int)power fromDecisionSource:(int)source {
-    sharedMitigationController = self;
+static void Insulation_MitigationController_setCPUPowerCeilingFromDecisionSource(id self, SEL _cmd, int power, int source) {
+    g_activeMitigationController = self;
     if (insulationCpuMode == 2) {
-        %orig(MAX(power, InsulationUnrestrictedPowerTarget), source);
-    } else {
-        %orig(power, source);
+        if (Orig_MitigationController_setCPUPowerCeilingFromDecisionSource) Orig_MitigationController_setCPUPowerCeilingFromDecisionSource(self, _cmd, MAX(power, InsulationUnrestrictedPowerTarget), source);
+        return;
     }
+    if (Orig_MitigationController_setCPUPowerCeilingFromDecisionSource) Orig_MitigationController_setCPUPowerCeilingFromDecisionSource(self, _cmd, power, source);
 }
 
-- (void)setCPUPowerZoneTarget:(int)power {
+static void Insulation_MitigationController_setCPUPowerZoneTarget(id self, SEL _cmd, int power) {
+    g_activeMitigationController = self;
     if (insulationCpuMode == 2) {
-        %orig(MAX(power, InsulationUnrestrictedPowerTarget));
-    } else {
-        %orig(power);
+        if (Orig_MitigationController_setCPUPowerZoneTarget) Orig_MitigationController_setCPUPowerZoneTarget(self, _cmd, MAX(power, InsulationUnrestrictedPowerTarget));
+        return;
     }
+    if (Orig_MitigationController_setCPUPowerZoneTarget) Orig_MitigationController_setCPUPowerZoneTarget(self, _cmd, power);
 }
-%end
 
-%end // MitigationHooks
+// 采用 Insulation 原生动态 Hook 工具
+static BOOL InsulationHookMethod(Class cls, SEL selector, IMP replacement, IMP *originalOut) {
+    if (!cls || !selector || !replacement || !originalOut) return NO;
+    Method method = class_getInstanceMethod(cls, selector);
+    if (!method) return NO;
+    *originalOut = method_getImplementation(method);
+    method_setImplementation(method, replacement);
+    return YES;
+}
+
+// 强制刷新硬件调度状态并双重写入
+static void applyInsulationDaemonState(void) {
+    if (!g_activeMitigationController) return;
+    @try {
+        if (insulationCpuMode == 1) {
+            if ([g_activeMitigationController respondsToSelector:@selector(setPowerSaveActive:)]) {
+                [g_activeMitigationController setPowerSaveActive:YES];
+            }
+            if ([g_activeMitigationController respondsToSelector:@selector(setCPULevel:)]) {
+                [g_activeMitigationController setCPULevel:2];
+            }
+            if ([g_activeMitigationController respondsToSelector:@selector(updateCPU)]) {
+                [g_activeMitigationController updateCPU];
+            }
+            if ([g_activeMitigationController respondsToSelector:@selector(setPowerSaveActive:)]) {
+                [g_activeMitigationController setPowerSaveActive:YES];
+            }
+            if ([g_activeMitigationController respondsToSelector:@selector(setCPULevel:)]) {
+                [g_activeMitigationController setCPULevel:2];
+            }
+        } else if (insulationCpuMode == 2) {
+            if ([g_activeMitigationController respondsToSelector:@selector(setPowerSaveActive:)]) {
+                [g_activeMitigationController setPowerSaveActive:NO];
+            }
+            if ([g_activeMitigationController respondsToSelector:@selector(setCPULevel:)]) {
+                [g_activeMitigationController setCPULevel:0];
+            }
+            if ([g_activeMitigationController respondsToSelector:@selector(updateCPU)]) {
+                [g_activeMitigationController updateCPU];
+            }
+        } else if (insulationCpuMode == 0) {
+            if ([g_activeMitigationController respondsToSelector:@selector(setPowerSaveActive:)]) {
+                [g_activeMitigationController setPowerSaveActive:NO];
+            }
+            if ([g_activeMitigationController respondsToSelector:@selector(setCPULevel:)]) {
+                [g_activeMitigationController setCPULevel:0];
+            }
+            if ([g_activeMitigationController respondsToSelector:@selector(updateCPU)]) {
+                [g_activeMitigationController updateCPU];
+            }
+        }
+    } @catch (NSException *e) {}
+}
 
 #pragma mark - 11. 构造函数入口
 
@@ -2729,27 +2746,31 @@ static void registerV160Observers(void) {
         });
         
     } else if ([processName isEqualToString:@"thermalmonitord"]) {
-        Class cls = objc_getClass("MitigationController");
-        if (!cls) return;
+        // 🟢 注入 thermalmonitord，安装原生 Runtime Hook
+        Class mitigationClass = objc_getClass("MitigationController");
+        if (mitigationClass) {
+            InsulationHookMethod(mitigationClass, @selector(setPowerSaveActive:), (IMP)Insulation_MitigationController_setPowerSaveActive, (IMP *)&Orig_MitigationController_setPowerSaveActive);
+            InsulationHookMethod(mitigationClass, @selector(setCPULevel:), (IMP)Insulation_MitigationController_setCPULevel, (IMP *)&Orig_MitigationController_setCPULevel);
+            InsulationHookMethod(mitigationClass, @selector(setCPULowPowerTarget:), (IMP)Insulation_MitigationController_setCPULowPowerTarget, (IMP *)&Orig_MitigationController_setCPULowPowerTarget);
+            InsulationHookMethod(mitigationClass, @selector(setCPUPowerCeiling:fromDecisionSource:), (IMP)Insulation_MitigationController_setCPUPowerCeilingFromDecisionSource, (IMP *)&Orig_MitigationController_setCPUPowerCeilingFromDecisionSource);
+            InsulationHookMethod(mitigationClass, @selector(setCPUPowerZoneTarget:), (IMP)Insulation_MitigationController_setCPUPowerZoneTarget, (IMP *)&Orig_MitigationController_setCPUPowerZoneTarget);
+        }
 
-        %init(MitigationHooks);
-
-        // 1. 注册内核调度频道的监听
+        // 注册跨进程内核调度频道的监听
         int token;
         notify_register_dispatch(NOTIFY_CPU_MODE, &token, dispatch_get_main_queue(), ^(int t) {
             uint64_t state = 0;
             if (notify_get_state(t, &state) == NOTIFY_STATUS_OK) {
                 insulationCpuMode = (NSInteger)state;
-                applyMitigationState();
+                applyInsulationDaemonState();
             }
         });
 
-        // 2. 初始化时主动抓取一次状态
         uint64_t initialState = 0;
         if (notify_get_state(token, &initialState) == NOTIFY_STATUS_OK) {
             insulationCpuMode = (NSInteger)initialState;
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-                applyMitigationState();
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                applyInsulationDaemonState();
             });
         }
     }
