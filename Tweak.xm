@@ -141,7 +141,7 @@ typedef struct {
 #pragma mark - 3. 全局状态变量
 
 static UIWindow *cpuWindow = nil;
-static SBCCPUFloatingView *floatingView = nil;
+static SBCPUFloatingView *floatingView = nil;
 static SBCPUDetailViewController *detailVC = nil;
 
 static BOOL isEnabled = YES; 
@@ -1703,7 +1703,7 @@ static void applySystemRefreshRate(void) {
 
 #pragma mark - 7. 详细状态 UI 面板与数据绑定
 
-@implementation SBCPUDetailViewController
+@implementation SBCCPUDetailViewController
 
 - (void)viewDidLoad {
     [super viewDidLoad];
@@ -2244,8 +2244,9 @@ static void applySystemRefreshRate(void) {
         } else if (indexPath.row == 2) {
             cell.textLabel.text = @"吸附模式";
             NSArray *modes = @[@"自动", @"左侧", @"右侧", @"顶部", @"底部"];
-            cell.detailTextLabel.text = (dockMode >= 0 && dockMode < modes.count) ? modes[dockMode] : @"自动";
-            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+            dockMode = (dockMode + 1) % modes.count;
+            SavePreferencesAndNotify();
+            [tableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationNone];
         }
     } else if (indexPath.section == 4) {
         if (indexPath.row == 0) {
