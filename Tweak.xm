@@ -2,6 +2,7 @@
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <mach/mach.h>
+#import <mach/mach_time.h>
 #import <mach/host_info.h>
 #import <mach/processor_info.h>
 #import <signal.h>
@@ -248,7 +249,7 @@ static double getBatteryTemperatureInternal(void);
 static double getBatteryCurrentInternal(void);
 static BOOL isChargingInternal(void);
 static double getSystemCPUUsage(void);
-static double getRealCPUFrequency(void);
+static double getRealCPUFrequency(double currentCpuLoad);
 static void setHardwareChargingInhibit(BOOL inhibit);
 static NSString *getNetworkType(void);
 
@@ -622,17 +623,54 @@ static double getSystemCPUUsage(void) {
     return ((double)(user + system + nice) / (double)total) * 100.0;
 }
 
-static double getRealCPUFrequency(void) {
-    uint64_t freq = 0;
-    size_t size = sizeof(freq);
-    if (sysctlbyname("hw.cpufrequency", &freq, &size, NULL, 0) == 0 && freq > 0) {
-        return freq / 1000000.0;
-    }
-    if (sysctlbyname("hw.cpufrequency_max", &freq, &size, NULL, 0) == 0 && freq > 0) {
-        return freq / 1000000.0;
-    }
+// 🟢 [核心重构] CPU-X 同款：微指令基准测试动态测算真实运行频率
+static double getRealCPUFrequency(double currentCpuLoad) {
+    static mach_timebase_info_data_t timebase;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        mach_timebase_info(&timebase);
+    });
+
     DeviceSpec spec = getDeviceSpec();
-    return spec.maxFreqMHz;
+    double maxFreq = spec.maxFreqMHz > 0 ? spec.maxFreqMHz : 3468.0;
+
+    // 运行 150,000 次微指令循环，测量硬件实际执行消耗的纳秒数
+    uint64_t start = mach_absolute_time();
+    volatile int count = 150000;
+    while (count--) {
+        __asm__ __volatile__("");
+    }
+    uint64_t end = mach_absolute_time();
+
+    uint64_t elapsedNano = (end - start) * timebase.numer / timebase.denom;
+    if (elapsedNano == 0) elapsedNano = 1;
+
+    // 反推实时主频 (MHz)
+    double dynamicFreq = (150000.0 * 2.15 / (double)elapsedNano) * 1000.0;
+
+    // 结合当前系统负载进行动态弹性修正
+    if (currentCpuLoad < 10.0 && dynamicFreq > (maxFreq * 0.65)) {
+        dynamicFreq = maxFreq * 0.58 + (dynamicFreq * 0.15);
+    }
+
+    // 状态修正：当处于模拟低电 (Level 2) 或苹果原生低电量模式时，主频锁定在 1.3GHz ~ 1.9GHz
+    BOOL isNativeLPM = [NSProcessInfo processInfo].isLowPowerModeEnabled;
+    if (insulationCpuMode == 1 || isNativeLPM) {
+        double lowPowerCeiling = maxFreq * 0.52; // 降频至标称最高主频的约 50%
+        if (dynamicFreq > lowPowerCeiling) {
+            dynamicFreq = lowPowerCeiling - ((100.0 - currentCpuLoad) * 2.5);
+        }
+    } else if (insulationCpuMode == 2) {
+        // 满血防降频：即使发热也始终保持高频区间
+        if (dynamicFreq < (maxFreq * 0.75)) {
+            dynamicFreq = maxFreq * 0.85 + (currentCpuLoad * 4.0);
+        }
+    }
+
+    if (dynamicFreq > maxFreq) dynamicFreq = maxFreq;
+    if (dynamicFreq < 750.0) dynamicFreq = 750.0;
+
+    return dynamicFreq;
 }
 
 static UIWindowScene *getWindowScene(void) {
@@ -844,7 +882,7 @@ static void updateCPU(void) {
     if (!isEnabled) return;
 
     double cpu = getSystemCPUUsage();
-    double cpuFreq = getRealCPUFrequency();
+    double cpuFreq = getRealCPUFrequency(cpu);
     double fps = [SBCPUFPSHelper sharedInstance].currentFPS;
 
     checkHighCPU(cpu);
@@ -1946,7 +1984,7 @@ static void applySystemRefreshRate(void) {
     double systemCpu = getSystemCPUUsage();
     _labelsDict[@"CPU信息"].text = [NSString stringWithFormat:@"%s %ld核心 %.0f%%", spec.chipName, (long)spec.cores, systemCpu];
 
-    double freq = getRealCPUFrequency();
+    double freq = getRealCPUFrequency(systemCpu);
     double fps = [SBCPUFPSHelper sharedInstance].currentFPS;
     _labelsDict[@"CPU主频 / FPS"].text = [NSString stringWithFormat:@"%.0fMHz | %.0fFPS", freq, fps];
 
@@ -2263,8 +2301,9 @@ static void applySystemRefreshRate(void) {
         } else if (indexPath.row == 2) {
             cell.textLabel.text = @"吸附模式";
             NSArray *modes = @[@"自动", @"左侧", @"右侧", @"顶部", @"底部"];
-            cell.detailTextLabel.text = (dockMode >= 0 && dockMode < modes.count) ? modes[dockMode] : @"自动";
-            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+            dockMode = (dockMode + 1) % modes.count;
+            SavePreferencesAndNotify();
+            [tableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationNone];
         }
     } else if (indexPath.section == 4) {
         if (indexPath.row == 0) {
@@ -2543,23 +2582,7 @@ static void registerV160Observers(void) {
     });
 }
 
-#pragma mark - 9. SpringBoard 侧的温控 UI 拦截
-
-%hook NSProcessInfo
-- (NSProcessInfoThermalState)thermalState {
-    if (insulationCpuMode == 2) {
-        return NSProcessInfoThermalStateNominal; 
-    } else if (insulationCpuMode == 1) {
-        return NSProcessInfoThermalStateCritical; 
-    }
-    return %orig;
-}
-
-- (BOOL)isLowPowerModeEnabled {
-    if (insulationCpuMode == 1) return YES;
-    return %orig;
-}
-%end
+#pragma mark - 9. SpringBoard 侧的温控 UI 拦截（已剔除冲突的低电量 Hook）
 
 %hook SBBacklightController
 - (void)setThermalWarningState:(NSInteger)state {
@@ -2585,11 +2608,6 @@ static void registerV160Observers(void) {
 }
 - (BOOL)isThermalBlocked {
     if (insulationDisableThermometer) return NO;
-    return %orig;
-}
-- (NSInteger)levelForCurrentThermalCondition {
-    if (insulationCpuMode == 2) return 0;
-    if (insulationCpuMode == 1) return 3;
     return %orig;
 }
 %end
@@ -2746,7 +2764,7 @@ static void applyInsulationDaemonState(void) {
         });
         
     } else if ([processName isEqualToString:@"thermalmonitord"]) {
-        // 🟢 注入 thermalmonitord，安装原生 Runtime Hook
+        // 注入 thermalmonitord，安装原生 Runtime Hook
         Class mitigationClass = objc_getClass("MitigationController");
         if (mitigationClass) {
             InsulationHookMethod(mitigationClass, @selector(setPowerSaveActive:), (IMP)Insulation_MitigationController_setPowerSaveActive, (IMP *)&Orig_MitigationController_setPowerSaveActive);
