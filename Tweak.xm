@@ -54,6 +54,12 @@ typedef struct {
 
 #pragma mark - 2. 所有类的极严格前置声明
 
+@interface MitigationController : NSObject
+- (void)setPowerSaveActive:(BOOL)arg1;
+- (void)setCPULevel:(int)arg1;
+- (void)updateCPU;
+@end
+
 @interface SpringBoard : UIApplication
 - (UIInterfaceOrientation)activeInterfaceOrientation;
 @end
@@ -204,6 +210,9 @@ static CFAbsoluteTime lastNetSpeedTime = 0;
 static host_cpu_load_info_data_t prev_cpu_load;
 static BOOL has_prev_cpu_load = NO;
 
+static __weak MitigationController *sharedMitigationController = nil;
+static const int InsulationUnrestrictedPowerTarget = 65000;
+
 #pragma mark - 4. 所有的底层 C 函数前置声明
 
 static DeviceSpec getDeviceSpec(void);
@@ -239,6 +248,8 @@ static double getRealCPUFrequency(void);
 static void setHardwareChargingInhibit(BOOL inhibit);
 static NSString *getNetworkType(void);
 
+static void applyMitigationState(void);
+
 // 🟢 跨进程通知发送器 (由 SpringBoard 向内核广播)
 static void SendCPUModeToDaemon(NSInteger mode) {
     int token;
@@ -250,6 +261,50 @@ static void SendCPUModeToDaemon(NSInteger mode) {
 }
 
 #pragma mark - 5. 底层 C 函数具体实现与 CFPreferences 全局引擎
+
+static void applyMitigationState(void) {
+    if (!sharedMitigationController) return;
+    @try {
+        if (insulationCpuMode == 1) { // 模拟低电锁频 (Level 2)
+            if ([sharedMitigationController respondsToSelector:@selector(setPowerSaveActive:)]) {
+                [sharedMitigationController setPowerSaveActive:YES];
+            }
+            if ([sharedMitigationController respondsToSelector:@selector(setCPULevel:)]) {
+                [sharedMitigationController setCPULevel:2];
+            }
+            if ([sharedMitigationController respondsToSelector:@selector(updateCPU)]) {
+                [sharedMitigationController performSelector:@selector(updateCPU)];
+            }
+            // 双重写入，防覆盖
+            if ([sharedMitigationController respondsToSelector:@selector(setPowerSaveActive:)]) {
+                [sharedMitigationController setPowerSaveActive:YES];
+            }
+            if ([sharedMitigationController respondsToSelector:@selector(setCPULevel:)]) {
+                [sharedMitigationController setCPULevel:2];
+            }
+        } else if (insulationCpuMode == 2) { // 满血解除温控限制 (Level 0)
+            if ([sharedMitigationController respondsToSelector:@selector(setPowerSaveActive:)]) {
+                [sharedMitigationController setPowerSaveActive:NO];
+            }
+            if ([sharedMitigationController respondsToSelector:@selector(setCPULevel:)]) {
+                [sharedMitigationController setCPULevel:0];
+            }
+            if ([sharedMitigationController respondsToSelector:@selector(updateCPU)]) {
+                [sharedMitigationController performSelector:@selector(updateCPU)];
+            }
+        } else if (insulationCpuMode == 0) { // 原生模式
+            if ([sharedMitigationController respondsToSelector:@selector(setPowerSaveActive:)]) {
+                [sharedMitigationController setPowerSaveActive:NO];
+            }
+            if ([sharedMitigationController respondsToSelector:@selector(setCPULevel:)]) {
+                [sharedMitigationController setCPULevel:0];
+            }
+            if ([sharedMitigationController respondsToSelector:@selector(updateCPU)]) {
+                [sharedMitigationController performSelector:@selector(updateCPU)];
+            }
+        }
+    } @catch (NSException *e) {}
+}
 
 static DeviceSpec getDeviceSpec(void) {
     char machine[256] = {0};
@@ -372,16 +427,18 @@ static void LoadPreferences(void) {
     smartChargeLimitEnable = getBoolPref(CFSTR("smartChargeLimitEnable"), NO);
     smartChargeLimitTemp = getFloatPref(CFSTR("smartChargeLimitTemp"), 38.0f);
 
-    applyVisibility();
-    if (showFps || force120HzEnable) {
-        [[SBCPUFPSHelper sharedInstance] startMonitoring];
-    } else {
-        [[SBCPUFPSHelper sharedInstance] stopMonitoring];
+    NSString *processName = [NSProcessInfo processInfo].processName;
+    if ([processName isEqualToString:@"SpringBoard"]) {
+        applyVisibility();
+        if (showFps || force120HzEnable) {
+            [[SBCPUFPSHelper sharedInstance] startMonitoring];
+        } else {
+            [[SBCPUFPSHelper sharedInstance] stopMonitoring];
+        }
+        applySystemRefreshRate();
+        
+        SendCPUModeToDaemon(insulationCpuMode);
     }
-    applySystemRefreshRate();
-    
-    // 同步给温控守护进程
-    SendCPUModeToDaemon(insulationCpuMode);
 }
 
 static void SavePreferencesAndNotify(void) {
@@ -432,8 +489,9 @@ static void SavePreferencesAndNotify(void) {
 
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), kPrefChangedNotification, NULL, NULL, YES);
     
-    // 将最新模式推送到内核频道
-    SendCPUModeToDaemon(insulationCpuMode);
+    if ([[NSProcessInfo processInfo].processName isEqualToString:@"SpringBoard"]) {
+        SendCPUModeToDaemon(insulationCpuMode);
+    }
 }
 
 static void setHardwareChargingInhibit(BOOL inhibit) {
@@ -495,7 +553,7 @@ static NSString *getNetworkType(void) {
                 if (tech) {
                     if ([tech isEqualToString:@"CTRadioAccessTechnologyNRNSA"] || [tech isEqualToString:@"CTRadioAccessTechnologyNR"]) return @"5G 网络";
                     if ([tech isEqualToString:@"CTRadioAccessTechnologyLTE"]) return @"4G 网络";
-                    if ([tech isEqualToString:@"CTRadioAccessTechnologyWCDMA"] || [tech isEqualToString:@"CTRadioAccessTechnologyHSDPA"] || [tech isEqualToString:@"CTRadioAccessTechnologyHSUPA"] || [tech isEqualToString:@"CTRadioAccessTechnologyCDMA1x"] || [tech isEqualToString:@"CTRadioAccessTechnologyCDMAEVDORev0"] || [tech isEqualToString:@"CTRadioAccessTechnologyCDMAEVDORevA"] || [tech isEqualToString:@"CTRadioAccessTechnologyCDMAEVDORevB"] || [tech isEqualToString:@"CTRadioAccessTechnology流动eHRPD"]) return @"3G 网络";
+                    if ([tech isEqualToString:@"CTRadioAccessTechnologyWCDMA"] || [tech isEqualToString:@"CTRadioAccessTechnologyHSDPA"] || [tech isEqualToString:@"CTRadioAccessTechnologyHSUPA"] || [tech isEqualToString:@"CTRadioAccessTechnologyCDMA1x"] || [tech isEqualToString:@"CTRadioAccessTechnologyCDMAEVDORev0"] || [tech isEqualToString:@"CTRadioAccessTechnologyCDMAEVDORevA"] || [tech isEqualToString:@"CTRadioAccessTechnologyCDMAEVDORevB"] || [tech isEqualToString:@"CTRadioAccessTechnologyeHRPD"]) return @"3G 网络";
                     if ([tech isEqualToString:@"CTRadioAccessTechnologyEdge"] || [tech isEqualToString:@"CTRadioAccessTechnologyGPRS"]) return @"2G 网络";
                 }
             }
@@ -911,7 +969,7 @@ static void applySystemRefreshRate(void) {
     [[SBCPUFPSHelper sharedInstance] updateFrameRate];
 }
 
-#pragma mark - 6. Objective-C 类实现区块
+#pragma mark - 6. 所有的 Objective-C 类实现区块
 
 @implementation SBCPUFPSHelper {
     CADisplayLink *_displayLink;
@@ -1452,7 +1510,7 @@ static void applySystemRefreshRate(void) {
     if (pan.state == UIGestureRecognizerStateBegan) {
         if (_isCollapsed) [self expandFromEdgeAnimated:NO];
         self.lastPoint = self.center;
-    } else if (pan.state ==标志StateChanged) {
+    } else if (pan.state == UIGestureRecognizerStateChanged) {
         CGPoint translation = [pan translationInView:self.superview];
         CGPoint targetCenter = CGPointMake(self.lastPoint.x + translation.x, self.lastPoint.y + translation.y);
 
@@ -2244,8 +2302,9 @@ static void applySystemRefreshRate(void) {
         } else if (indexPath.row == 2) {
             cell.textLabel.text = @"吸附模式";
             NSArray *modes = @[@"自动", @"左侧", @"右侧", @"顶部", @"底部"];
-            cell.detailTextLabel.text = (dockMode >= 0 && dockMode < modes.count) ? modes[dockMode] : @"自动";
-            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+            dockMode = (dockMode + 1) % modes.count;
+            SavePreferencesAndNotify();
+            [tableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationNone];
         }
     } else if (indexPath.section == 4) {
         if (indexPath.row == 0) {
@@ -2585,27 +2644,114 @@ static void registerV160Observers(void) {
 }
 %end
 
+#pragma mark - 10. thermalmonitord 底层核心 Hook 组
+
+%group MitigationHooks
+
+%hook MitigationController
+
+- (void)setPowerSaveActive:(BOOL)active {
+    sharedMitigationController = self;
+    if (insulationCpuMode == 2) {
+        %orig(NO);
+    } else if (insulationCpuMode == 1) {
+        %orig(YES);
+    } else {
+        %orig(active);
+    }
+}
+
+- (void)setCPULevel:(int)level {
+    sharedMitigationController = self;
+    if (insulationCpuMode == 2) {
+        %orig(0);
+    } else if (insulationCpuMode == 1) {
+        %orig(2); // 严格锁定低频
+    } else {
+        %orig(level);
+    }
+}
+
+- (void)setCPULowPowerTarget:(int)power {
+    if (insulationCpuMode == 2) {
+        %orig(MAX(power, InsulationUnrestrictedPowerTarget));
+    } else {
+        %orig(power);
+    }
+}
+
+- (void)setCPUPowerCeiling:(int)power fromDecisionSource:(int)source {
+    sharedMitigationController = self;
+    if (insulationCpuMode == 2) {
+        %orig(MAX(power, InsulationUnrestrictedPowerTarget), source);
+    } else {
+        %orig(power, source);
+    }
+}
+
+- (void)setCPUPowerZoneTarget:(int)power {
+    if (insulationCpuMode == 2) {
+        %orig(MAX(power, InsulationUnrestrictedPowerTarget));
+    } else {
+        %orig(power);
+    }
+}
+%end
+
+%end // MitigationHooks
+
+#pragma mark - 11. 构造函数入口
+
 %ctor {
     %init;
     
-    LoadPreferences();
-    
-    CFNotificationCenterAddObserver(
-        CFNotificationCenterGetDarwinNotifyCenter(),
-        NULL,
-        onCCNotificationReceived,
-        kPrefChangedNotification,
-        NULL,
-        CFNotificationSuspensionBehaviorDeliverImmediately
-    );
-    
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-        createCPUWindow();
-        registerV160Observers();
+    NSString *processName = [NSProcessInfo processInfo].processName;
 
-        [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *timer) {
-            updateCPU();
-        }];
-    });
+    if ([processName isEqualToString:@"SpringBoard"]) {
+        LoadPreferences();
+        
+        CFNotificationCenterAddObserver(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            NULL,
+            onCCNotificationReceived,
+            kPrefChangedNotification,
+            NULL,
+            CFNotificationSuspensionBehaviorDeliverImmediately
+        );
+        
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            createCPUWindow();
+            registerV160Observers();
+
+            [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *timer) {
+                updateCPU();
+            }];
+        });
+        
+    } else if ([processName isEqualToString:@"thermalmonitord"]) {
+        Class cls = objc_getClass("MitigationController");
+        if (!cls) return;
+
+        %init(MitigationHooks);
+
+        // 1. 注册内核调度频道的监听
+        int token;
+        notify_register_dispatch(NOTIFY_CPU_MODE, &token, dispatch_get_main_queue(), ^(int t) {
+            uint64_t state = 0;
+            if (notify_get_state(t, &state) == NOTIFY_STATUS_OK) {
+                insulationCpuMode = (NSInteger)state;
+                applyMitigationState();
+            }
+        });
+
+        // 2. 初始化时主动抓取一次状态
+        uint64_t initialState = 0;
+        if (notify_get_state(token, &initialState) == NOTIFY_STATUS_OK) {
+            insulationCpuMode = (NSInteger)initialState;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+                applyMitigationState();
+            });
+        }
+    }
 }
 
