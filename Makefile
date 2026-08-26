@@ -14,4 +14,3 @@ SBCPUFloating_PRIVATE_FRAMEWORKS = PowerUI IOKit
 include $(THEOS_MAKE_PATH)/tweak.mk
 
 INSTALL_TARGET_PROCESSES = SpringBoard thermalmonitord
-
