@@ -2,18 +2,19 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 #import <notify.h>
-#import <IOKit/IOKitLib.h>
-#import <substrate.h> // 必须引入，支持 MSHookFunction 拦截 C 语言函数
-
-#ifndef kIOMainPortDefault
-#define kIOMainPortDefault kIOMasterPortDefault
-#endif
+#import <mach/mach.h>
+#import <dlfcn.h>
+#import <substrate.h> 
 
 #define NOTIFY_CPU_MODE "com.yourname.sbcpufloating.cpumode"
 static const int InsulationUnrestrictedPowerTarget = 65000;
 static int gNotifyToken = -1;
 
-// 👑 [绝杀机制 1]：同步无延迟强读内核通信状态
+// 🟢 手动声明 C 接口，彻底告别编译报错
+typedef mach_port_t io_registry_entry_t;
+extern "C" kern_return_t IORegistryEntrySetCFProperty(io_registry_entry_t entry, CFStringRef propertyName, CFTypeRef property);
+
+// 👑 同步强读跨进程开关状态，0延迟
 static NSInteger getRealTimeMitigationMode() {
     if (gNotifyToken == -1) {
         notify_register_check(NOTIFY_CPU_MODE, &gNotifyToken);
@@ -23,8 +24,8 @@ static NSInteger getRealTimeMitigationMode() {
     return (NSInteger)state;
 }
 
-// 👑 [绝杀机制 2]：C语言底层 IOKit 硬件拦截 (HoldCPU 同款防反弹黑科技)
-static kern_return_t (*orig_IORegistryEntrySetCFProperty)(io_registry_entry_t entry, CFStringRef propertyName, CFTypeRef property);
+// 👑 [绝杀机制]：C语言底层 IOKit 硬件拦截 (HoldCPU 纯正防反弹黑科技)
+static kern_return_t (*orig_IORegistryEntrySetCFProperty)(io_registry_entry_t, CFStringRef, CFTypeRef);
 
 static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry, CFStringRef propertyName, CFTypeRef property) {
     if (!propertyName) return orig_IORegistryEntrySetCFProperty(entry, propertyName, property);
@@ -32,10 +33,9 @@ static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry
     NSInteger mode = getRealTimeMitigationMode();
     
     if (mode == 1) { 
-        // 模拟低频模式：拦截系统试图恢复频率的操作，死死按住 Level 2
-        if (CFStringCompare(propertyName, CFSTR("p-state-cap"), 0) == kCFCompareEqualTo ||
-            CFStringCompare(propertyName, CFSTR("CPU_Ceiling"), 0) == kCFCompareEqualTo ||
-            CFStringCompare(propertyName, CFSTR("CPU_Floor"), 0) == kCFCompareEqualTo) {
+        // 模拟低频模式：拦截系统恢复频率的操作，死死按住 Level 2
+        NSString *propStr = (__bridge NSString *)propertyName;
+        if ([propStr isEqualToString:@"p-state-cap"] || [propStr isEqualToString:@"CPU_Ceiling"] || [propStr isEqualToString:@"CPU_Floor"]) {
             // 系统想满血？强制改为 Level 2 低频限制，并直接骗系统写入成功！
             orig_IORegistryEntrySetCFProperty(entry, propertyName, (__bridge CFTypeRef)@(2));
             return KERN_SUCCESS; 
@@ -43,8 +43,8 @@ static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry
     } 
     else if (mode == 2) { 
         // 满血防降频模式：拦截降频操作，强写为无限制
-        if (CFStringCompare(propertyName, CFSTR("p-state-cap"), 0) == kCFCompareEqualTo ||
-            CFStringCompare(propertyName, CFSTR("CPU_Ceiling"), 0) == kCFCompareEqualTo) {
+        NSString *propStr = (__bridge NSString *)propertyName;
+        if ([propStr isEqualToString:@"p-state-cap"] || [propStr isEqualToString:@"CPU_Ceiling"]) {
             orig_IORegistryEntrySetCFProperty(entry, propertyName, (__bridge CFTypeRef)@(15));
             return KERN_SUCCESS; 
         }
@@ -62,7 +62,7 @@ static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry
 - (void)updateCPU;
 @end
 
-// 👑 [绝杀机制 3]：温控系统逻辑层拦截双保险
+// 👑 [温控双保险]
 %hook MitigationController
 
 - (void)setPowerSaveActive:(BOOL)active {
@@ -114,13 +114,19 @@ static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry
 %ctor {
     NSString *processName = [NSProcessInfo processInfo].processName;
     
-    // 同时镇压苹果底层的两大护法：温控监控 (thermalmonitord) 和 硬件电源总控 (powerd)
+    // 镇压苹果底层的两大护法：温控监控和硬件电源总控
     if ([processName isEqualToString:@"thermalmonitord"] || [processName isEqualToString:@"powerd"]) {
         
         %init;
         
-        // 🚀 启动 IOKit C 语言级拦截，这一步是彻底锁死硬件的核心！
-        MSHookFunction((void *)IORegistryEntrySetCFProperty, (void *)hook_IORegistryEntrySetCFProperty, (void **)&orig_IORegistryEntrySetCFProperty);
+        // 🚀 动态内存寻址 Hook，无视一切 SDK 报错！
+        void *ioKitHandle = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW);
+        if (ioKitHandle) {
+            void *funcPtr = dlsym(ioKitHandle, "IORegistryEntrySetCFProperty");
+            if (funcPtr) {
+                MSHookFunction(funcPtr, (void *)hook_IORegistryEntrySetCFProperty, (void **)&orig_IORegistryEntrySetCFProperty);
+            }
+        }
 
         // 底层高优先级守护定时器：强行持续心跳压制
         dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0));
