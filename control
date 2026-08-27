@@ -1,9 +1,12 @@
+```yaml
 Package: com.sbcpu.floating
-Name: SB CPU Floating
-Version: 2.7
+Name: SB CPU Floating Notification
+Version: 2.8
 Architecture: iphoneos-arm64
 Maintainer: MoWang
 Author: MoWang
-Description: SpringBoard CPU Floating Monitor and CPU Mitigation Controller
+Description: SpringBoard CPU Floating Monitor, Notification Manager, and CPU Mitigation Controller
 Section: Tweaks
 Depends: mobilesubstrate
+
+```
