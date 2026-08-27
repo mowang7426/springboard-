@@ -2,6 +2,11 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 #import <notify.h>
+#import <IOKit/IOKitLib.h>
+
+#ifndef kIOMainPortDefault
+#define kIOMainPortDefault kIOMasterPortDefault
+#endif
 
 #define NOTIFY_CPU_MODE "com.yourname.sbcpufloating.cpumode"
 
@@ -18,26 +23,60 @@ static id g_activeMitigationController = nil;
 - (void)updateCPU;
 @end
 
-// 🟢 每秒死循环暴力镇压，绝不给系统恢复的机会
+// 🟢 IOKit 硬件底层穿透级降频（无视系统逻辑，强写内核树，死死按住！）
+static void applyDirectHardwarePowerLevel(NSInteger mode) {
+    io_service_t rootDomain = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPMrootDomain"));
+    if (rootDomain) {
+        if (mode == 1) {
+            IORegistryEntrySetCFProperty(rootDomain, CFSTR("CPU_Ceiling"), (__bridge CFTypeRef)@(2));
+            IORegistryEntrySetCFProperty(rootDomain, CFSTR("CPU_Floor"), (__bridge CFTypeRef)@(2));
+        } else if (mode == 2) {
+            IORegistryEntrySetCFProperty(rootDomain, CFSTR("CPU_Ceiling"), (__bridge CFTypeRef)@(15));
+            IORegistryEntrySetCFProperty(rootDomain, CFSTR("CPU_Floor"), (__bridge CFTypeRef)@(0));
+        }
+        IOObjectRelease(rootDomain);
+    }
+
+    io_iterator_t iterator;
+    if (IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("AppleARMIODevice"), &iterator) == KERN_SUCCESS) {
+        io_registry_entry_t regEntry;
+        while ((regEntry = IOIteratorNext(iterator))) {
+            if (mode == 1) {
+                IORegistryEntrySetCFProperty(regEntry, CFSTR("p-state-cap"), (__bridge CFTypeRef)@(2));
+            } else if (mode == 2) {
+                IORegistryEntrySetCFProperty(regEntry, CFSTR("p-state-cap"), (__bridge CFTypeRef)@(15));
+            }
+            IOObjectRelease(regEntry);
+        }
+        IOObjectRelease(iterator);
+    }
+}
+
+// 🟢 综合施压：Controller + IOKit 双管齐下
 static void enforceMitigationState(void) {
-    if (!g_activeMitigationController) return;
     @try {
         if (insulationCpuMode == 1) { 
             // 模拟低电模式：强行打入 Level 2
-            if ([g_activeMitigationController respondsToSelector:@selector(setPowerSaveActive:)]) {
-                [g_activeMitigationController setPowerSaveActive:YES];
+            if (g_activeMitigationController) {
+                if ([g_activeMitigationController respondsToSelector:@selector(setPowerSaveActive:)]) {
+                    [g_activeMitigationController setPowerSaveActive:YES];
+                }
+                if ([g_activeMitigationController respondsToSelector:@selector(setCPULevel:)]) {
+                    [g_activeMitigationController setCPULevel:2];
+                }
             }
-            if ([g_activeMitigationController respondsToSelector:@selector(setCPULevel:)]) {
-                [g_activeMitigationController setCPULevel:2];
-            }
+            applyDirectHardwarePowerLevel(1);
         } else if (insulationCpuMode == 2) {
             // 满血模式：强行解除
-            if ([g_activeMitigationController respondsToSelector:@selector(setPowerSaveActive:)]) {
-                [g_activeMitigationController setPowerSaveActive:NO];
+            if (g_activeMitigationController) {
+                if ([g_activeMitigationController respondsToSelector:@selector(setPowerSaveActive:)]) {
+                    [g_activeMitigationController setPowerSaveActive:NO];
+                }
+                if ([g_activeMitigationController respondsToSelector:@selector(setCPULevel:)]) {
+                    [g_activeMitigationController setCPULevel:0];
+                }
             }
-            if ([g_activeMitigationController respondsToSelector:@selector(setCPULevel:)]) {
-                [g_activeMitigationController setCPULevel:0];
-            }
+            applyDirectHardwarePowerLevel(2);
         }
     } @catch (NSException *e) {}
 }
@@ -82,7 +121,6 @@ static void enforceMitigationState(void) {
     %orig(power);
 }
 
-// 顺应系统的自然心跳，同时覆盖数据
 - (void)updateCPU {
     g_activeMitigationController = self;
     enforceMitigationState();
@@ -110,7 +148,7 @@ static void enforceMitigationState(void) {
         insulationCpuMode = (NSInteger)initialState;
     }
 
-    // 独立定时器，每 1 秒在底层发一次冲击，系统改回多少次我就压回去多少次
+    // 🚀 死守反击定时器：每 1 秒在底层发一次冲击，系统改回多少次我就压回去多少次！
     dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
     dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 1.0 * NSEC_PER_SEC), 1.0 * NSEC_PER_SEC, 0.1 * NSEC_PER_SEC);
     dispatch_source_set_event_handler(timer, ^{
