@@ -39,6 +39,9 @@
 - (void)setMinimumRefreshRate:(float)rate;
 - (void)setMaximumRefreshRate:(float)rate;
 - (void)setIdealRefreshRate:(float)rate;
+- (float)minimumRefreshRate;
+- (float)maximumRefreshRate;
+- (float)idealRefreshRate;
 @end
 
 typedef struct {
@@ -99,6 +102,8 @@ typedef struct {
 @property (nonatomic, strong) UILabel *miniCpuLabel;
 @property (nonatomic, assign) BOOL isCollapsed;
 @property (nonatomic, strong) NSTimer *inactivityTimer;
+@property (nonatomic, strong) UITapGestureRecognizer *singleTapGesture;
+@property (nonatomic, strong) UILongPressGestureRecognizer *longPressGesture;
 
 - (void)resetInactivityTimer;
 - (void)collapseToEdgeAnimated:(BOOL)animated;
@@ -152,7 +157,7 @@ static BOOL autoCollapseEnable = YES;
 static NSInteger autoCollapseDelay = 4;
 static NSInteger collapsedDisplayMode = 0; // 0=CPU, 1=FPS, 2=温度, 3=电流
 
-// 🟢 新增：横屏自动展开开关
+// 🟢 横屏游戏自动展开开关
 static BOOL autoExpandLandscape = YES;
 
 static BOOL autoLogoutEnable = NO;
@@ -267,6 +272,9 @@ static DeviceSpec getDeviceSpec(void) {
     if ([platform isEqualToString:@"iPhone14,2"]) return (DeviceSpec){"iPhone14,2", "iPhone 13 Pro", "A15 Bionic", 6, 3240.0, 3095};
     if ([platform isEqualToString:@"iPhone14,5"]) return (DeviceSpec){"iPhone14,5", "iPhone 13", "A15 Bionic", 6, 3240.0, 3227};
     if ([platform isEqualToString:@"iPhone14,4"]) return (DeviceSpec){"iPhone14,4", "iPhone 13 mini", "A15 Bionic", 6, 3240.0, 2406};
+    if ([platform isEqualToString:@"iPhone13,4"]) return (DeviceSpec){"iPhone13,4", "iPhone 12 Pro Max", "A14 Bionic", 6, 3100.0, 3687};
+    if ([platform isEqualToString:@"iPhone13,3"]) return (DeviceSpec){"iPhone13,3", "iPhone 12 Pro", "A14 Bionic", 6, 3100.0, 2815};
+    if ([platform isEqualToString:@"iPhone13,2"]) return (DeviceSpec){"iPhone13,2", "iPhone 12", "A14 Bionic", 6, 3100.0, 2815};
     if ([platform isEqualToString:@"iPhone17,1"]) return (DeviceSpec){"iPhone17,1", "iPhone 16 Pro", "A18 Pro", 6, 4040.0, 3582};
     if ([platform isEqualToString:@"iPhone17,2"]) return (DeviceSpec){"iPhone17,2", "iPhone 16 Pro Max", "A18 Pro", 6, 4040.0, 4685};
 
@@ -328,7 +336,7 @@ static void LoadPreferences(void) {
     autoCollapseEnable = getBoolPref(CFSTR("autoCollapseEnable"), YES);
     autoCollapseDelay = getIntPref(CFSTR("autoCollapseDelay"), 4);
     collapsedDisplayMode = getIntPref(CFSTR("collapsedDisplayMode"), 0);
-    autoExpandLandscape = getBoolPref(CFSTR("autoExpandLandscape"), YES); // 读取横屏展开
+    autoExpandLandscape = getBoolPref(CFSTR("autoExpandLandscape"), YES); 
 
     autoLogoutEnable = getBoolPref(CFSTR("autoLogoutEnable"), NO);
     logoutCPUThreshold = (double)getFloatPref(CFSTR("logoutCPUThreshold"), 100.0);
@@ -382,7 +390,7 @@ static void SavePreferencesAndNotify(void) {
     setBoolPref(CFSTR("autoCollapseEnable"), autoCollapseEnable);
     setIntPref(CFSTR("autoCollapseDelay"), autoCollapseDelay);
     setIntPref(CFSTR("collapsedDisplayMode"), collapsedDisplayMode);
-    setBoolPref(CFSTR("autoExpandLandscape"), autoExpandLandscape); // 保存横屏展开
+    setBoolPref(CFSTR("autoExpandLandscape"), autoExpandLandscape); 
 
     setBoolPref(CFSTR("autoLogoutEnable"), autoLogoutEnable);
     setFloatPref(CFSTR("logoutCPUThreshold"), (float)logoutCPUThreshold);
@@ -559,12 +567,13 @@ static double getSystemCPUUsage(void) {
     return ((double)(user + system + nice) / (double)total) * 100.0;
 }
 
+// 👑 [真实主频模拟] 不再使用假循环测试，而是根据 Level 和负载真实推算！
 static double getRealCPUFrequency(double currentCpuUsage) {
     DeviceSpec spec = getDeviceSpec();
     double maxFreq = spec.maxFreqMHz > 0 ? spec.maxFreqMHz : 3468.0;
 
     if (insulationCpuMode == 1) {
-        maxFreq = maxFreq * 0.45; // 低电模式天花板砍半
+        maxFreq = maxFreq * 0.45; // 开启低电频率时，直接砍断真实频率天花板
     }
 
     double minFreq = 600.0; 
@@ -601,7 +610,7 @@ static UIInterfaceOrientation getActiveInterfaceOrientation(void) {
     return scene ? scene.interfaceOrientation : UIInterfaceOrientationPortrait;
 }
 
-// 👑 [新增功能] 智能避让灵动岛/刘海 & 横屏自动展开
+// 👑 [避让灵动岛与横屏自适应]
 static void clampAndPositionFloatingView(CGPoint targetCenter, BOOL animate) {
     if (!floatingView || !floatingView.superview) return;
 
@@ -666,14 +675,12 @@ static void clampAndPositionFloatingView(CGPoint targetCenter, BOOL animate) {
         if (targetCenter.y > maxY) targetCenter.y = maxY;
     }
 
-    // 👑 [避让灵动岛] 物理碰撞检测
-    // 只有在竖屏状态（高度 > 宽度），且处于顶部中央区域时，强制向下推
+    // 👑 自动避让灵动岛 (只在竖屏、高度>800的刘海/灵动岛机型上生效)
     if (containerBounds.size.height > containerBounds.size.width && containerBounds.size.height > 800) {
         if (targetCenter.y - halfH < 54.0) { // 高度处于灵动岛范围内
-            // 宽度处于灵动岛中间部分（左右 75pt）
             if (targetCenter.x + halfW > containerBounds.size.width / 2.0 - 75.0 &&
                 targetCenter.x - halfW < containerBounds.size.width / 2.0 + 75.0) {
-                targetCenter.y = 54.0 + halfH + 4.0; // 强行把浮窗推到灵动岛下方
+                targetCenter.y = 54.0 + halfH + 4.0; // 强行把浮窗推到灵动岛下方，绝不遮挡
             }
         }
     }
@@ -736,14 +743,13 @@ static void updateFloatingSize(void) {
             break;
     }
 
-    // 👑 [横屏自动展开] 判断
+    // 👑 横屏自动展开逻辑
     if (autoExpandLandscape) {
         if (isLandscape) {
             if (floatingView.isCollapsed) {
                 [floatingView expandFromEdgeAnimated:YES];
             }
         } else {
-            // 回到竖屏后，恢复倒计时逻辑
             [floatingView resetInactivityTimer];
         }
     }
@@ -1280,7 +1286,6 @@ static void applySystemRefreshRate(void) {
 
 - (void)inactivityTimerFired {
     if (!settingsShowing && !detailShowing && !_isCollapsed) {
-        // 👑 [横屏自动展开] 判断当前屏幕状态，如果是横屏且开启了开关，阻止折叠
         UIInterfaceOrientation orientation = getActiveInterfaceOrientation();
         BOOL isLandscape = (orientation == UIInterfaceOrientationLandscapeLeft || orientation == UIInterfaceOrientationLandscapeRight);
         if (autoExpandLandscape && isLandscape) {
@@ -1476,7 +1481,6 @@ static void applySystemRefreshRate(void) {
     }
 }
 
-// 👑 [新增控制] 只有通过点击（Tap），才会触发展开操作
 - (void)handleSingleTap:(UITapGestureRecognizer *)tap {
     if (tap.state == UIGestureRecognizerStateEnded) {
         if (_isCollapsed) [self expandFromEdgeAnimated:YES];
@@ -1484,7 +1488,6 @@ static void applySystemRefreshRate(void) {
     }
 }
 
-// 👑 [体验优化] 拖动时不会触发展开，保持原来小巧的折叠形态
 - (void)handlePan:(UIPanGestureRecognizer *)pan {
     [self resetInactivityTimer];
 
@@ -1519,7 +1522,6 @@ static void applySystemRefreshRate(void) {
             [[NSUserDefaults standardUserDefaults] setObject:NSStringFromCGRect(self.frame) forKey:@"SBCPU.LastFrame"];
             [[NSUserDefaults standardUserDefaults] synchronize];
         }
-        // 拖动完毕后自动贴边
         clampAndPositionFloatingView(self.center, YES);
         [self resetInactivityTimer];
     }
@@ -2164,7 +2166,7 @@ static void applySystemRefreshRate(void) {
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     (void)tableView;
-    if (section == 0) return 4; // 🟢 新增一行横屏展开开关
+    if (section == 0) return 4; 
     if (section == 1) return 3;
     if (section == 2) return 4;
     if (section == 3) return 3;
@@ -2221,7 +2223,6 @@ static void applySystemRefreshRate(void) {
             cell.detailTextLabel.text = (collapsedDisplayMode >= 0 && collapsedDisplayMode < modes.count) ? modes[collapsedDisplayMode] : modes[0];
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         } else if (indexPath.row == 3) {
-            // 👑 [新增功能] 横屏游戏自动展开
             cell.textLabel.text = @"横屏游戏自动展开";
             UISwitch *sw = [UISwitch new];
             sw.on = autoExpandLandscape;
@@ -2532,7 +2533,7 @@ static void applySystemRefreshRate(void) {
 - (void)changeAutoExpandLandscape:(UISwitch *)sw {
     autoExpandLandscape = sw.isOn;
     SavePreferencesAndNotify();
-    if (floatingView) updateFloatingSize(); // 立即生效
+    if (floatingView) updateFloatingSize();
 }
 
 - (void)changeLogout:(UISwitch *)sw { autoLogoutEnable = sw.isOn; SavePreferencesAndNotify(); }
