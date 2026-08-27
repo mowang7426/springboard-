@@ -88,7 +88,7 @@ typedef struct {
 @property (nonatomic, strong) UILabel *batteryValueLabel;
 @property (nonatomic, strong) UILabel *batterySubLabel;
 @property (nonatomic, strong) UIView *div2;
-@property (nonatomic, strong) UILabel *tempIconLabel; // 恢复使用 UILabel，配合变换实现正向
+@property (nonatomic, strong) UILabel *tempIconLabel; // 🟢 正向温度计图标
 @property (nonatomic, strong) UILabel *tempValueLabel;
 @property (nonatomic, strong) UILabel *tempSubLabel;
 @property (nonatomic, strong) UIView *div3;
@@ -240,8 +240,7 @@ static double getBatteryCurrentInternal(void);
 static BOOL isChargingInternal(void);
 
 static double getSpringBoardCPUUsage(void);
-// 🟢 保留并前置声明全局总进程 CPU 检测函数
-static double getTotalCPUUsage(void);
+static double getTotalCPUUsage(void); // 🟢 声明了系统总CPU获取函数
 static double getRealCPUFrequency(double currentCpuUsage);
 static void setHardwareChargingInhibit(BOOL inhibit);
 static NSString *getNetworkType(void);
@@ -249,6 +248,7 @@ static NSString *getNetworkType(void);
 static void SendCPUModeToDaemon(NSInteger mode, BOOL blockDimming, BOOL forceFastCharge) {
     int token;
     if (notify_register_check(NOTIFY_CPU_MODE, &token) == NOTIFY_STATUS_OK) {
+        // Bit 8=防暗屏, Bit 9=强制满血快充
         uint64_t state = (mode & 0xFF) | ((blockDimming ? 1ULL : 0) << 8) | ((forceFastCharge ? 1ULL : 0) << 9);
         notify_set_state(token, state);
         notify_post(NOTIFY_CPU_MODE);
@@ -587,7 +587,7 @@ static double getSpringBoardCPUUsage(void) {
     return total_cpu;
 }
 
-// 🟢 重新实现全局系统 CPU 计算函数（专门用于长按详情页，解决编译报错）
+// 🟢 获取系统全局物理总 CPU 进程使用率 (仅供详情页显示)
 static double getTotalCPUUsage(void) {
     kern_return_t kr;
     mach_msg_type_number_t count;
@@ -880,6 +880,7 @@ static void checkHighCPU(double cpu) {
 static void updateCPU(void) {
     if (!isEnabled) return;
 
+    // 🟢 依然使用单进程 CPU 负载率给悬浮窗，不影响你原本的监控！
     double cpu = getSpringBoardCPUUsage();
     double cpuFreq = getRealCPUFrequency(cpu);
     double fps = [SBCPUFPSHelper sharedInstance].currentFPS;
@@ -1119,24 +1120,18 @@ static void applySystemRefreshRate(void) {
         _longPressGesture.delegate = self;
         [self addGestureRecognizer:_longPressGesture];
 
-        // 柔和优雅的阴影 
         self.layer.shadowColor = [UIColor blackColor].CGColor;
-        self.layer.shadowOpacity = 0.15f;
+        self.layer.shadowOpacity = 0.18f;
         self.layer.shadowOffset = CGSizeMake(0, 4);
         self.layer.shadowRadius = 12.0f;
 
-        // 🟢 完美恢复浅色液态白玻璃风格
         UIBlurEffect *blurEffect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight];
         _blurView = [[UIVisualEffectView alloc] initWithEffect:blurEffect];
-        // 加入淡淡的奶白透射感，彻底消除黑灰
-        _blurView.backgroundColor = [UIColor colorWithWhite:1.0f alpha:0.40f];
-        
         CGFloat cornerRad = floatingCornerRadius;
         _blurView.layer.cornerRadius = cornerRad;
         _blurView.layer.masksToBounds = YES;
-        // 加入极细微的白色反光勾边，增加玻璃通透感
         _blurView.layer.borderWidth = 0.5f;
-        _blurView.layer.borderColor = [UIColor colorWithWhite:1.0f alpha:0.75f].CGColor;
+        _blurView.layer.borderColor = [UIColor colorWithWhite:1.0f alpha:0.60f].CGColor;
         _blurView.userInteractionEnabled = NO;
         [self addSubview:_blurView];
 
@@ -1151,8 +1146,7 @@ static void applySystemRefreshRate(void) {
         UIView *content = _blurView.contentView;
         content.userInteractionEnabled = NO;
 
-        // 🟢 匹配液态白玻璃的深色字体
-        UIColor *titleGrayColor = [UIColor darkGrayColor];
+        UIColor *titleGrayColor = [UIColor colorWithWhite:0.35 alpha:1.0f];
         
         _cpuTitleLabel = [[UILabel alloc] init];
         _cpuTitleLabel.text = @"CPU";
@@ -1162,7 +1156,7 @@ static void applySystemRefreshRate(void) {
 
         _cpuValueLabel = [[UILabel alloc] init];
         _cpuValueLabel.textColor = [UIColor colorWithRed:0.18f green:0.75f blue:0.35f alpha:1.0f]; 
-        _cpuValueLabel.font = [UIFont monospacedDigitSystemFontOfSize:16 weight:UIFontWeightBold];
+        _cpuValueLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightBold];
         _cpuValueLabel.adjustsFontSizeToFitWidth = YES;
         _cpuValueLabel.minimumScaleFactor = 0.5f;
         [content addSubview:_cpuValueLabel];
@@ -1186,7 +1180,7 @@ static void applySystemRefreshRate(void) {
 
         _fpsValueLabel = [[UILabel alloc] init];
         _fpsValueLabel.textColor = [UIColor colorWithRed:0.47f green:0.33f blue:0.90f alpha:1.0f];
-        _fpsValueLabel.font = [UIFont monospacedDigitSystemFontOfSize:16 weight:UIFontWeightBold];
+        _fpsValueLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightBold];
         _fpsValueLabel.adjustsFontSizeToFitWidth = YES;
         _fpsValueLabel.minimumScaleFactor = 0.5f;
         [content addSubview:_fpsValueLabel];
@@ -1207,8 +1201,8 @@ static void applySystemRefreshRate(void) {
         [content addSubview:_batteryIconLabel];
 
         _batteryValueLabel = [[UILabel alloc] init];
-        _batteryValueLabel.textColor = [UIColor colorWithRed:0.15f green:0.55f blue:0.25f alpha:1.0f];
-        _batteryValueLabel.font = [UIFont monospacedDigitSystemFontOfSize:14 weight:UIFontWeightBold];
+        _batteryValueLabel.textColor = [UIColor colorWithRed:0.15f green:0.45f blue:0.25f alpha:1.0f];
+        _batteryValueLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightBold];
         _batteryValueLabel.adjustsFontSizeToFitWidth = YES;
         _batteryValueLabel.minimumScaleFactor = 0.5f;
         [content addSubview:_batteryValueLabel];
@@ -1223,18 +1217,16 @@ static void applySystemRefreshRate(void) {
         _div2.backgroundColor = [UIColor colorWithWhite:0.0f alpha:0.1f];
         [content addSubview:_div2];
 
-        // 🟢 恢复原生的带色彩的小温度计 Emoji，并通过旋转摆正它
         _tempIconLabel = [[UILabel alloc] init];
         _tempIconLabel.text = @"🌡";
         _tempIconLabel.font = [UIFont systemFontOfSize:17];
-        // 关键代码：通过矩阵旋转将斜着的温度计向左拉回正向
         _tempIconLabel.transform = CGAffineTransformMakeRotation(-0.35); 
         _tempIconLabel.textAlignment = NSTextAlignmentCenter;
         [content addSubview:_tempIconLabel];
 
         _tempValueLabel = [[UILabel alloc] init];
         _tempValueLabel.textColor = [UIColor blackColor];
-        _tempValueLabel.font = [UIFont monospacedDigitSystemFontOfSize:14 weight:UIFontWeightBold];
+        _tempValueLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightBold];
         _tempValueLabel.adjustsFontSizeToFitWidth = YES;
         _tempValueLabel.minimumScaleFactor = 0.5f;
         [content addSubview:_tempValueLabel];
@@ -1256,7 +1248,7 @@ static void applySystemRefreshRate(void) {
 
         _currentValueLabel = [[UILabel alloc] init];
         _currentValueLabel.textColor = [UIColor blackColor];
-        _currentValueLabel.font = [UIFont monospacedDigitSystemFontOfSize:14 weight:UIFontWeightBold];
+        _currentValueLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightBold];
         _currentValueLabel.adjustsFontSizeToFitWidth = YES;
         _currentValueLabel.minimumScaleFactor = 0.5f;
         [content addSubview:_currentValueLabel];
@@ -1295,7 +1287,7 @@ static void applySystemRefreshRate(void) {
 
         _miniCpuLabel = [[UILabel alloc] initWithFrame:CGRectMake(22, 5, 45, 18)]; 
         _miniCpuLabel.textColor = [UIColor blackColor];
-        _miniCpuLabel.font = [UIFont monospacedDigitSystemFontOfSize:12 weight:UIFontWeightBold];
+        _miniCpuLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightBold];
         _miniCpuLabel.textAlignment = NSTextAlignmentLeft;
         [_collapsedContainerView addSubview:_miniCpuLabel];
 
@@ -1610,7 +1602,7 @@ static void applySystemRefreshRate(void) {
 
     CABasicAnimation *glowAnim = [CABasicAnimation animationWithKeyPath:@"borderColor"];
     glowAnim.fromValue = (id)[UIColor colorWithRed:0.2f green:0.95f blue:0.5f alpha:1.0f].CGColor;
-    glowAnim.toValue = (id)[UIColor colorWithWhite:1.0f alpha:0.75f].CGColor;
+    glowAnim.toValue = (id)[UIColor colorWithWhite:1.0f alpha:0.60f].CGColor;
     glowAnim.duration = 0.7;
     [_blurView.layer addAnimation:glowAnim forKey:@"borderGlow"];
 }
@@ -1699,7 +1691,6 @@ static void applySystemRefreshRate(void) {
 
     if (showTemp) {
         CGFloat tempW = 60.0f;
-        // 🟢 温度计原图尺寸调整，使其居中好看
         _tempIconLabel.frame = CGRectMake(currentX, padY + 11, 20, 20);
         _tempValueLabel.frame = CGRectMake(currentX + 24, padY + 10, tempW - 24, 16);
         _tempSubLabel.frame = CGRectMake(currentX + 24, padY + 27, tempW - 24, 12);
@@ -1787,7 +1778,7 @@ static void applySystemRefreshRate(void) {
     
     if (!isCurrentlyChargeInhibited) {
         if (forceFastChargeEnable && isCharging) {
-            _statusLabel.text = @"⚡ 满血快充无视限制中";
+            _statusLabel.text = @"⚡ 满血快充绕过限制中";
             _statusLabel.textColor = [UIColor systemRedColor];
         } else {
             _statusLabel.text = isCharging ? @"正在充电" : @"未在充电";
@@ -1832,7 +1823,7 @@ static void applySystemRefreshRate(void) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.view.backgroundColor = [UIColor colorWithWhite:0 alpha:0.3]; // 柔和背板阴影
+    self.view.backgroundColor = [UIColor colorWithWhite:0 alpha:0.25];
     _labelsDict = [NSMutableDictionary dictionary];
 
     if ([CMPedometer isStepCountingAvailable]) {
@@ -1848,14 +1839,12 @@ static void applySystemRefreshRate(void) {
     CGFloat panelW = MIN(screenW - margin * 2, 420.0);
     CGFloat panelH = MIN(screenH - margin * 4, 340.0);
 
-    // 🟢 详情页面跟进改成通透的奶白液态玻璃风格
     UIBlurEffect *blur = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight];
     _blurEffectView = [[UIVisualEffectView alloc] initWithEffect:blur];
     _blurEffectView.frame = CGRectMake((screenW - panelW)/2.0, (screenH - panelH)/2.0, panelW, panelH);
     _blurEffectView.layer.cornerRadius = 24.0;
     _blurEffectView.layer.masksToBounds = YES;
     _blurEffectView.layer.borderWidth = 0.0;
-    _blurEffectView.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.5]; // 补充奶白色彩
     [self.view addSubview:_blurEffectView];
 
     UITapGestureRecognizer *preventTap = [[UITapGestureRecognizer alloc] initWithTarget:nil action:nil];
@@ -1891,7 +1880,7 @@ static void applySystemRefreshRate(void) {
         @"电池当前电量", @"电池设计容量", @"电池实际容量", @"电池当前容量"
     ];
 
-    // 🟢 恢复系统总 CPU 字段
+    // 🟢 精准修改：将此处变回系统总 CPU
     NSArray *rightKeys = @[
         @"设备名称", @"软件版本", @"网络信息", @"内网地址",
         @"实时网速", @"系统总 CPU", @"CPU主频 / FPS", @"内存剩余",
@@ -1911,7 +1900,6 @@ static void applySystemRefreshRate(void) {
     }
 }
 
-// 🟢 文本修改为白底深色主题
 - (UILabel *)createRowWithTitle:(NSString *)title x:(CGFloat)x y:(CGFloat)y width:(CGFloat)width parent:(UIView *)parent {
     UILabel *keyLbl = [[UILabel alloc] initWithFrame:CGRectMake(x, y, width * 0.46, 20)];
     keyLbl.text = [NSString stringWithFormat:@"%@:", title];
@@ -2059,7 +2047,7 @@ static void applySystemRefreshRate(void) {
     }
     _labelsDict[@"实时网速"].text = [NSString stringWithFormat:@"↑%lluK ↓%lluK", speedUpBytesPerSec / 1024, speedDownBytesPerSec / 1024];
 
-    // 🟢 恢复系统级总进程 CPU 读取函数，彻底解决报错，也正确显示物理多核总负载
+    // 🟢 精准修改：使用 getTotalCPUUsage，让详情页呈现全设备物理总 CPU 负载！
     double totalSystemCpu = getTotalCPUUsage();
     _labelsDict[@"系统总 CPU"].text = [NSString stringWithFormat:@"%s %ld核心 %.0f%%", spec.chipName, (long)spec.cores, totalSystemCpu];
 
