@@ -156,8 +156,11 @@ static BOOL previousChargingState = NO;
 
 static BOOL autoCollapseEnable = YES;
 static NSInteger autoCollapseDelay = 4;
-static NSInteger collapsedDisplayMode = 0; 
+static NSInteger collapsedDisplayMode = 0; // 0=CPU, 1=FPS, 2=温度, 3=电流
+
+// 🟢 横屏游戏自动展开开关
 static BOOL autoExpandLandscape = YES;
+static BOOL wasLandscape = NO; // 用于记录横竖屏状态变化
 
 static BOOL autoLogoutEnable = NO;
 static double logoutCPUThreshold = 100.0;
@@ -178,12 +181,11 @@ static BOOL showFps = YES;
 static BOOL force120HzEnable = NO;               
 static BOOL thermalProtectionEnable = YES;       
 
-// 👑 新版拦截状态
 static NSInteger insulationCpuMode = 0;           
-static BOOL blockThermalDimming = YES;        // 拦截温控暗屏
-static BOOL blockThermalAlert = YES;          // 拦截温度计弹窗
-static BOOL blockPocketTemp = YES;            // 拦截口袋高温
-static BOOL forceSunlightHBM = NO;            // 拦截阳光限制
+static BOOL blockThermalDimming = YES;        
+static BOOL blockThermalAlert = YES;          
+static BOOL blockPocketTemp = YES;            
+static BOOL forceSunlightHBM = NO;            
 
 static BOOL smartChargeLimitEnable = NO;
 static float smartChargeLimitTemp = 38.0f;
@@ -204,8 +206,6 @@ static uint64_t speedUpBytesPerSec = 0;
 static uint64_t speedDownBytesPerSec = 0;
 static CFAbsoluteTime lastNetSpeedTime = 0;
 
-static host_cpu_load_info_data_t prev_cpu_load;
-static BOOL has_prev_cpu_load = NO;
 
 #pragma mark - 4. 所有的底层 C 函数前置声明
 
@@ -237,7 +237,9 @@ static NSDictionary *getRealBatteryDetails(void);
 static double getBatteryTemperatureInternal(void);
 static double getBatteryCurrentInternal(void);
 static BOOL isChargingInternal(void);
-static double getSystemCPUUsage(void);
+
+// 🟢 修改为单进程专属检测
+static double getSpringBoardCPUUsage(void);
 static double getRealCPUFrequency(double currentCpuUsage);
 static void setHardwareChargingInhibit(BOOL inhibit);
 static NSString *getNetworkType(void);
@@ -246,7 +248,6 @@ static NSString *getNetworkType(void);
 static void SendCPUModeToDaemon(NSInteger mode, BOOL blockDimming) {
     int token;
     if (notify_register_check(NOTIFY_CPU_MODE, &token) == NOTIFY_STATUS_OK) {
-        // 使用 64 位整型承载多组布尔指令，突破单通频道的限制！
         uint64_t state = (mode & 0xFF) | ((blockDimming ? 1ULL : 0) << 8);
         notify_set_state(token, state);
         notify_post(NOTIFY_CPU_MODE);
@@ -364,7 +365,6 @@ static void LoadPreferences(void) {
     showBatteryCurrent = getBoolPref(CFSTR("showBatteryCurrent"), YES);
 
     insulationCpuMode = getIntPref(CFSTR("insulationCpuMode"), 0);
-    // 👑 自动兼容读取旧版用户的设置，但应用新的拦截逻辑
     blockThermalDimming = getBoolPref(CFSTR("blockThermalDimming"), YES);
     blockThermalAlert = getBoolPref(CFSTR("blockThermalAlert"), YES);
     blockPocketTemp = getBoolPref(CFSTR("blockPocketTemp"), YES);
@@ -384,7 +384,6 @@ static void LoadPreferences(void) {
         }
         applySystemRefreshRate();
         
-        // 发送加密参数给底层
         SendCPUModeToDaemon(insulationCpuMode, blockThermalDimming);
     }
 }
@@ -548,27 +547,35 @@ static BOOL isDeviceOverheated(void) {
     return getBatteryTemperatureInternal() >= 43.0;
 }
 
-static double getSystemCPUUsage(void) {
-    mach_msg_type_number_t count = HOST_CPU_LOAD_INFO_COUNT;
-    host_cpu_load_info_data_t cpu_load;
-    if (host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO, (host_info_t)&cpu_load, &count) != KERN_SUCCESS) return 15.0;
+// 👑 [关键修复] 抛弃全局 CPU，使用 task_threads 精准计算 SpringBoard 单一进程 CPU 负载
+static double getSpringBoardCPUUsage(void) {
+    kern_return_t kr;
+    thread_array_t thread_list;
+    mach_msg_type_number_t thread_count;
+    thread_info_data_t thinfo;
+    mach_msg_type_number_t thread_info_count;
+    thread_basic_info_t basic_info_th;
 
-    if (!has_prev_cpu_load) {
-        prev_cpu_load = cpu_load;
-        has_prev_cpu_load = YES;
-        return 12.0;
+    kr = task_threads(mach_task_self(), &thread_list, &thread_count);
+    if (kr != KERN_SUCCESS) {
+        return 0.0;
     }
 
-    uint64_t user = cpu_load.cpu_ticks[CPU_STATE_USER] - prev_cpu_load.cpu_ticks[CPU_STATE_USER];
-    uint64_t system = cpu_load.cpu_ticks[CPU_STATE_SYSTEM] - prev_cpu_load.cpu_ticks[CPU_STATE_SYSTEM];
-    uint64_t idle = cpu_load.cpu_ticks[CPU_STATE_IDLE] - prev_cpu_load.cpu_ticks[CPU_STATE_IDLE];
-    uint64_t nice = cpu_load.cpu_ticks[CPU_STATE_NICE] - prev_cpu_load.cpu_ticks[CPU_STATE_NICE];
-
-    prev_cpu_load = cpu_load;
-    uint64_t total = user + system + idle + nice;
-    if (total == 0) return 0.0;
-
-    return ((double)(user + system + nice) / (double)total) * 100.0;
+    double total_cpu = 0.0;
+    for (int j = 0; j < (int)thread_count; j++) {
+        thread_info_count = THREAD_INFO_MAX;
+        kr = thread_info(thread_list[j], THREAD_BASIC_INFO, (thread_info_t)thinfo, &thread_info_count);
+        if (kr != KERN_SUCCESS) {
+            continue;
+        }
+        basic_info_th = (thread_basic_info_t)thinfo;
+        if (!(basic_info_th->flags & TH_FLAGS_IDLE)) {
+            total_cpu += (double)basic_info_th->cpu_usage / (double)TH_USAGE_SCALE * 100.0;
+        }
+    }
+    
+    kr = vm_deallocate(mach_task_self(), (vm_offset_t)thread_list, thread_count * sizeof(thread_t));
+    return total_cpu;
 }
 
 static double getRealCPUFrequency(double currentCpuUsage) {
@@ -725,33 +732,11 @@ static void updateFloatingSize(void) {
     }
 
     CGFloat rotationAngle = 0.0;
-    BOOL isLandscape = NO;
     switch (orientation) {
-        case UIInterfaceOrientationLandscapeLeft: 
-            rotationAngle = -M_PI_2; 
-            isLandscape = YES;
-            break;
-        case UIInterfaceOrientationLandscapeRight: 
-            rotationAngle = M_PI_2; 
-            isLandscape = YES;
-            break;
-        case UIInterfaceOrientationPortraitUpsideDown: 
-            rotationAngle = M_PI; 
-            break;
-        case UIInterfaceOrientationPortrait: 
-        default: 
-            rotationAngle = 0.0; 
-            break;
-    }
-
-    if (autoExpandLandscape) {
-        if (isLandscape) {
-            if (floatingView.isCollapsed) {
-                [floatingView expandFromEdgeAnimated:YES];
-            }
-        } else {
-            [floatingView resetInactivityTimer];
-        }
+        case UIInterfaceOrientationLandscapeLeft: rotationAngle = -M_PI_2; break;
+        case UIInterfaceOrientationLandscapeRight: rotationAngle = M_PI_2; break;
+        case UIInterfaceOrientationPortraitUpsideDown: rotationAngle = M_PI; break;
+        case UIInterfaceOrientationPortrait: default: rotationAngle = 0.0; break;
     }
 
     CGAffineTransform finalTransform = CGAffineTransformConcat(CGAffineTransformMakeScale(floatingScale, floatingScale), CGAffineTransformMakeRotation(rotationAngle));
@@ -861,7 +846,7 @@ static void checkHighCPU(double cpu) {
 static void updateCPU(void) {
     if (!isEnabled) return;
 
-    double cpu = getSystemCPUUsage();
+    double cpu = getSpringBoardCPUUsage();
     double cpuFreq = getRealCPUFrequency(cpu);
     double fps = [SBCPUFPSHelper sharedInstance].currentFPS;
 
@@ -903,14 +888,18 @@ static void updateCPU(void) {
         }
         previousChargingState = charging;
 
+        // 👑 [终极心跳检测修复]：彻底治愈折叠死锁，使用状态比对触发计时器
         if (autoExpandLandscape) {
             UIInterfaceOrientation orientation = getActiveInterfaceOrientation();
             BOOL isLandscape = (orientation == UIInterfaceOrientationLandscapeLeft || orientation == UIInterfaceOrientationLandscapeRight);
-            if (isLandscape && floatingView.isCollapsed) {
+            
+            if (isLandscape && !wasLandscape && floatingView.isCollapsed) {
                 [floatingView expandFromEdgeAnimated:YES];
-            } else if (!isLandscape && !floatingView.isCollapsed && floatingView.inactivityTimer == nil) {
+            } else if (!isLandscape && wasLandscape && !floatingView.isCollapsed) {
+                // 回到竖屏瞬间，强行激活倒计时，破除死锁
                 [floatingView resetInactivityTimer];
             }
+            wasLandscape = isLandscape;
         }
 
         if (isCurrentlyChargeInhibited) {
@@ -1300,8 +1289,17 @@ static void applySystemRefreshRate(void) {
     }
 }
 
+// 👑 [关键修复] 彻底解决定时器对象释放导致的折叠死锁
 - (void)inactivityTimerFired {
+    [_inactivityTimer invalidate];
+    _inactivityTimer = nil; // 必须手动置空，否则后续逻辑会认为倒计时依然在跑
+
     if (!settingsShowing && !detailShowing && !_isCollapsed) {
+        UIInterfaceOrientation orientation = getActiveInterfaceOrientation();
+        BOOL isLandscape = (orientation == UIInterfaceOrientationLandscapeLeft || orientation == UIInterfaceOrientationLandscapeRight);
+        if (autoExpandLandscape && isLandscape) {
+            return;
+        }
         [self collapseToEdgeAnimated:YES];
     }
 }
@@ -1825,9 +1823,10 @@ static void applySystemRefreshRate(void) {
         @"电池当前电量", @"电池设计容量", @"电池实际容量", @"电池当前容量"
     ];
 
+    // 🟢 文本修改，明确显示是 SpringBoard CPU
     NSArray *rightKeys = @[
         @"设备名称", @"软件版本", @"网络信息", @"内网地址",
-        @"实时网速", @"CPU信息", @"CPU主频 / FPS", @"内存剩余",
+        @"实时网速", @"SpringBoard CPU", @"CPU主频 / FPS", @"内存剩余",
         @"存储剩余", @"蜂窝/WiFi", @"运动信息", @"设备运行"
     ];
 
@@ -1987,8 +1986,8 @@ static void applySystemRefreshRate(void) {
     }
     _labelsDict[@"实时网速"].text = [NSString stringWithFormat:@"↑%lluK ↓%lluK", speedUpBytesPerSec / 1024, speedDownBytesPerSec / 1024];
 
-    double systemCpu = getSystemCPUUsage();
-    _labelsDict[@"CPU信息"].text = [NSString stringWithFormat:@"%s %ld核心 %.0f%%", spec.chipName, (long)spec.cores, systemCpu];
+    double systemCpu = getSpringBoardCPUUsage();
+    _labelsDict[@"SpringBoard CPU"].text = [NSString stringWithFormat:@"%s %ld核心 %.0f%%", spec.chipName, (long)spec.cores, systemCpu];
 
     double freq = getRealCPUFrequency(systemCpu);
     double fps = [SBCPUFPSHelper sharedInstance].currentFPS;
@@ -2322,7 +2321,6 @@ static void applySystemRefreshRate(void) {
             cell.detailTextLabel.text = (insulationCpuMode >= 0 && insulationCpuMode < modes.count) ? modes[insulationCpuMode] : modes[0];
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         } else if (indexPath.row == 1) {
-            // 👑 更名：改为拦截温控暗屏，逻辑更清晰
             cell.textLabel.text = @"拦截温控暗屏";
             UISwitch *sw = [UISwitch new];
             sw.on = blockThermalDimming;
@@ -2643,14 +2641,13 @@ static void registerV160Observers(void) {
 
 #pragma mark - 9. SpringBoard 侧的核心拦截防线
 
-// 👑 [三路绞杀]：桌面端也拦截 CoreBrightness 框架下发的暗屏指令
 %hook BrightnessSystemClient
 - (BOOL)setProperty:(id)property forKey:(NSString *)key {
     if (blockThermalDimming) {
         if ([key isEqualToString:@"DisplayThermalMitigation"] ||
             [key isEqualToString:@"ThermalMitigation"] ||
             [key isEqualToString:@"KeyboardBacklightBrightnessLimit"]) {
-            return YES; // 骗它说写入成功了，其实丢了
+            return YES; 
         }
     }
     return %orig;
@@ -2667,7 +2664,7 @@ static void registerV160Observers(void) {
 }
 - (void)_updateBrightnessForSunlightLoad:(BOOL)arg1 {
     if (forceSunlightHBM) {
-        %orig(NO); // 传入 NO 拦截阳光导致的最高亮度下降
+        %orig(NO); 
     } else {
         %orig(arg1);
     }
@@ -2723,5 +2720,4 @@ static void registerV160Observers(void) {
         });
     }
 }
-
 
