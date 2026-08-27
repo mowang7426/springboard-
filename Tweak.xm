@@ -25,6 +25,7 @@
 #define kPrefChangedNotification CFSTR("com.yourname.sbcpufloating.prefschanged")
 #define kToggleNotification CFSTR("com.yourname.sbcpufloating.toggle")
 
+// 🟢 跨进程内核通信频道
 #define NOTIFY_CPU_MODE "com.yourname.sbcpufloating.cpumode"
 
 #pragma mark - 1. QuartzCore 私有类及数据结构声明
@@ -206,7 +207,6 @@ static CFAbsoluteTime lastNetSpeedTime = 0;
 
 static host_cpu_load_info_data_t prev_cpu_load;
 static BOOL has_prev_cpu_load = NO;
-
 
 #pragma mark - 4. 所有的底层 C 函数前置声明
 
@@ -567,13 +567,12 @@ static double getSystemCPUUsage(void) {
     return ((double)(user + system + nice) / (double)total) * 100.0;
 }
 
-// 👑 [真实主频模拟] 不再使用假循环测试，而是根据 Level 和负载真实推算！
 static double getRealCPUFrequency(double currentCpuUsage) {
     DeviceSpec spec = getDeviceSpec();
     double maxFreq = spec.maxFreqMHz > 0 ? spec.maxFreqMHz : 3468.0;
 
     if (insulationCpuMode == 1) {
-        maxFreq = maxFreq * 0.45; // 开启低电频率时，直接砍断真实频率天花板
+        maxFreq = maxFreq * 0.45;
     }
 
     double minFreq = 600.0; 
@@ -675,12 +674,12 @@ static void clampAndPositionFloatingView(CGPoint targetCenter, BOOL animate) {
         if (targetCenter.y > maxY) targetCenter.y = maxY;
     }
 
-    // 👑 自动避让灵动岛 (只在竖屏、高度>800的刘海/灵动岛机型上生效)
+    // 👑 自动避让灵动岛
     if (containerBounds.size.height > containerBounds.size.width && containerBounds.size.height > 800) {
-        if (targetCenter.y - halfH < 54.0) { // 高度处于灵动岛范围内
+        if (targetCenter.y - halfH < 54.0) { 
             if (targetCenter.x + halfW > containerBounds.size.width / 2.0 - 75.0 &&
                 targetCenter.x - halfW < containerBounds.size.width / 2.0 + 75.0) {
-                targetCenter.y = 54.0 + halfH + 4.0; // 强行把浮窗推到灵动岛下方，绝不遮挡
+                targetCenter.y = 54.0 + halfH + 4.0;
             }
         }
     }
@@ -724,34 +723,11 @@ static void updateFloatingSize(void) {
     }
 
     CGFloat rotationAngle = 0.0;
-    BOOL isLandscape = NO;
     switch (orientation) {
-        case UIInterfaceOrientationLandscapeLeft: 
-            rotationAngle = -M_PI_2; 
-            isLandscape = YES;
-            break;
-        case UIInterfaceOrientationLandscapeRight: 
-            rotationAngle = M_PI_2; 
-            isLandscape = YES;
-            break;
-        case UIInterfaceOrientationPortraitUpsideDown: 
-            rotationAngle = M_PI; 
-            break;
-        case UIInterfaceOrientationPortrait: 
-        default: 
-            rotationAngle = 0.0; 
-            break;
-    }
-
-    // 👑 横屏自动展开逻辑
-    if (autoExpandLandscape) {
-        if (isLandscape) {
-            if (floatingView.isCollapsed) {
-                [floatingView expandFromEdgeAnimated:YES];
-            }
-        } else {
-            [floatingView resetInactivityTimer];
-        }
+        case UIInterfaceOrientationLandscapeLeft: rotationAngle = -M_PI_2; break;
+        case UIInterfaceOrientationLandscapeRight: rotationAngle = M_PI_2; break;
+        case UIInterfaceOrientationPortraitUpsideDown: rotationAngle = M_PI; break;
+        case UIInterfaceOrientationPortrait: default: rotationAngle = 0.0; break;
     }
 
     CGAffineTransform finalTransform = CGAffineTransformConcat(CGAffineTransformMakeScale(floatingScale, floatingScale), CGAffineTransformMakeRotation(rotationAngle));
@@ -902,6 +878,19 @@ static void updateCPU(void) {
             [floatingView triggerPlugAnimation];
         }
         previousChargingState = charging;
+
+        // 👑 [终极心跳检测修复]：每秒判断，确保横竖屏切换时绝不死锁！
+        if (autoExpandLandscape) {
+            UIInterfaceOrientation orientation = getActiveInterfaceOrientation();
+            BOOL isLandscape = (orientation == UIInterfaceOrientationLandscapeLeft || orientation == UIInterfaceOrientationLandscapeRight);
+            if (isLandscape && floatingView.isCollapsed) {
+                // 如果检测到是横屏，且它还折叠着，强制把它拉开！
+                [floatingView expandFromEdgeAnimated:YES];
+            } else if (!isLandscape && !floatingView.isCollapsed && floatingView.inactivityTimer == nil) {
+                // 如果检测到回到了竖屏，且它是展开的、并且定时器没启动，重新激活折叠倒计时！
+                [floatingView resetInactivityTimer];
+            }
+        }
 
         if (isCurrentlyChargeInhibited) {
             floatingView.statusLabel.text = @"⚠️ 高温旁路供电中";
@@ -1276,6 +1265,13 @@ static void applySystemRefreshRate(void) {
         _inactivityTimer = nil;
     }
     if (autoCollapseEnable && !_isCollapsed && !settingsShowing && !detailShowing) {
+        // 👑 如果是横屏且开了“横屏自动展开”，绝对不启动折叠定时器！
+        if (autoExpandLandscape) {
+            UIInterfaceOrientation orientation = getActiveInterfaceOrientation();
+            BOOL isLandscape = (orientation == UIInterfaceOrientationLandscapeLeft || orientation == UIInterfaceOrientationLandscapeRight);
+            if (isLandscape) return; 
+        }
+        
         _inactivityTimer = [NSTimer scheduledTimerWithTimeInterval:autoCollapseDelay
                                                              target:self
                                                            selector:@selector(inactivityTimerFired)
@@ -1286,11 +1282,6 @@ static void applySystemRefreshRate(void) {
 
 - (void)inactivityTimerFired {
     if (!settingsShowing && !detailShowing && !_isCollapsed) {
-        UIInterfaceOrientation orientation = getActiveInterfaceOrientation();
-        BOOL isLandscape = (orientation == UIInterfaceOrientationLandscapeLeft || orientation == UIInterfaceOrientationLandscapeRight);
-        if (autoExpandLandscape && isLandscape) {
-            return;
-        }
         [self collapseToEdgeAnimated:YES];
     }
 }
@@ -2436,6 +2427,7 @@ static void applySystemRefreshRate(void) {
 
             for (NSInteger i = 0; i < titles.count; i++) {
                 [alert addAction:[UIAlertAction actionWithTitle:titles[i] style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+                    (void)action;
                     floatingAlpha = [values[i] floatValue];
                     SavePreferencesAndNotify();
                     applyFloatingAlpha();
@@ -2697,4 +2689,3 @@ static void registerV160Observers(void) {
         });
     }
 }
-
