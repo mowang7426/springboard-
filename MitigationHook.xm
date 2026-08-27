@@ -3,6 +3,7 @@
 #import <objc/runtime.h>
 #import <notify.h>
 #import <IOKit/IOKitLib.h>
+#import <substrate.h> // 必须引入，用于 MSHookFunction
 
 #ifndef kIOMainPortDefault
 #define kIOMainPortDefault kIOMasterPortDefault
@@ -12,134 +13,115 @@
 
 static NSInteger insulationCpuMode = 0;
 static const int InsulationUnrestrictedPowerTarget = 65000;
-static id g_activeMitigationController = nil;
 
 @interface MitigationController : NSObject
 - (void)setPowerSaveActive:(BOOL)active;
 - (void)setCPULevel:(int)level;
-- (void)setCPULowPowerTarget:(int)power;
-- (void)setCPUPowerCeiling:(int)power fromDecisionSource:(int)source;
-- (void)setCPUPowerZoneTarget:(int)power;
 - (void)updateCPU;
 @end
 
-// 🟢 IOKit 硬件底层穿透级降频（无视系统逻辑，强写内核树，死死按住！）
-static void applyDirectHardwarePowerLevel(NSInteger mode) {
-    io_service_t rootDomain = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPMrootDomain"));
-    if (rootDomain) {
-        if (mode == 1) {
-            IORegistryEntrySetCFProperty(rootDomain, CFSTR("CPU_Ceiling"), (__bridge CFTypeRef)@(2));
-            IORegistryEntrySetCFProperty(rootDomain, CFSTR("CPU_Floor"), (__bridge CFTypeRef)@(2));
-        } else if (mode == 2) {
-            IORegistryEntrySetCFProperty(rootDomain, CFSTR("CPU_Ceiling"), (__bridge CFTypeRef)@(15));
-            IORegistryEntrySetCFProperty(rootDomain, CFSTR("CPU_Floor"), (__bridge CFTypeRef)@(0));
+// =====================================================================
+// 👑 [核心黑科技] IOKit 底层 C 函数拦截 (HoldCPU 同款机制)
+// =====================================================================
+
+// 保存原函数的指针
+static kern_return_t (*orig_IORegistryEntrySetCFProperty)(io_registry_entry_t entry, CFStringRef propertyName, CFTypeRef property);
+
+// 我们的拦截函数
+static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry, CFStringRef propertyName, CFTypeRef property) {
+    if (insulationCpuMode == 1) {
+        // 【模拟低频模式】拦截系统试图恢复频率的操作
+        if (CFStringCompare(propertyName, CFSTR("p-state-cap"), 0) == kCFCompareEqualTo ||
+            CFStringCompare(propertyName, CFSTR("CPU_Ceiling"), 0) == kCFCompareEqualTo ||
+            CFStringCompare(propertyName, CFSTR("CPU_Floor"), 0) == kCFCompareEqualTo) {
+            
+            // 系统想乱改？不准！我们强行把写入的值替换成极低频限制 (Level 2)
+            orig_IORegistryEntrySetCFProperty(entry, propertyName, (__bridge CFTypeRef)@(2));
+            
+            // 返回成功，欺骗苹果系统，让它以为自己成功了
+            return KERN_SUCCESS; 
         }
-        IOObjectRelease(rootDomain);
+    } 
+    else if (insulationCpuMode == 2) {
+        // 【防降频满血模式】拦截系统试图降低频率的操作
+        if (CFStringCompare(propertyName, CFSTR("p-state-cap"), 0) == kCFCompareEqualTo ||
+            CFStringCompare(propertyName, CFSTR("CPU_Ceiling"), 0) == kCFCompareEqualTo) {
+            
+            // 强行把写入的值替换成满血无限制 (Level 15/0)
+            orig_IORegistryEntrySetCFProperty(entry, propertyName, (__bridge CFTypeRef)@(15));
+            return KERN_SUCCESS; 
+        }
     }
 
-    io_iterator_t iterator;
-    if (IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("AppleARMIODevice"), &iterator) == KERN_SUCCESS) {
-        io_registry_entry_t regEntry;
-        while ((regEntry = IOIteratorNext(iterator))) {
-            if (mode == 1) {
-                IORegistryEntrySetCFProperty(regEntry, CFSTR("p-state-cap"), (__bridge CFTypeRef)@(2));
-            } else if (mode == 2) {
-                IORegistryEntrySetCFProperty(regEntry, CFSTR("p-state-cap"), (__bridge CFTypeRef)@(15));
-            }
-            IOObjectRelease(regEntry);
-        }
-        IOObjectRelease(iterator);
-    }
+    // 其他不相关的属性，放行给系统正常处理
+    return orig_IORegistryEntrySetCFProperty(entry, propertyName, property);
 }
 
-// 🟢 综合施压：Controller + IOKit 双管齐下
-static void enforceMitigationState(void) {
-    @try {
-        if (insulationCpuMode == 1) { 
-            // 模拟低电模式：强行打入 Level 2
-            if (g_activeMitigationController) {
-                if ([g_activeMitigationController respondsToSelector:@selector(setPowerSaveActive:)]) {
-                    [g_activeMitigationController setPowerSaveActive:YES];
-                }
-                if ([g_activeMitigationController respondsToSelector:@selector(setCPULevel:)]) {
-                    [g_activeMitigationController setCPULevel:2];
-                }
-            }
-            applyDirectHardwarePowerLevel(1);
-        } else if (insulationCpuMode == 2) {
-            // 满血模式：强行解除
-            if (g_activeMitigationController) {
-                if ([g_activeMitigationController respondsToSelector:@selector(setPowerSaveActive:)]) {
-                    [g_activeMitigationController setPowerSaveActive:NO];
-                }
-                if ([g_activeMitigationController respondsToSelector:@selector(setCPULevel:)]) {
-                    [g_activeMitigationController setCPULevel:0];
-                }
-            }
-            applyDirectHardwarePowerLevel(2);
-        }
-    } @catch (NSException *e) {}
-}
+
+// =====================================================================
+// 常规 Controller 拦截 (双保险)
+// =====================================================================
 
 %hook MitigationController
 
-- (instancetype)init {
-    id orig = %orig;
-    g_activeMitigationController = orig;
-    return orig;
-}
-
 - (void)setPowerSaveActive:(BOOL)active {
-    g_activeMitigationController = self;
     if (insulationCpuMode == 1) { %orig(YES); return; }
     if (insulationCpuMode == 2) { %orig(NO); return; }
     %orig(active);
 }
 
 - (void)setCPULevel:(int)level {
-    g_activeMitigationController = self;
     if (insulationCpuMode == 1) { %orig(2); return; }
     if (insulationCpuMode == 2) { %orig(0); return; }
     %orig(level);
 }
 
 - (void)setCPULowPowerTarget:(int)power {
-    g_activeMitigationController = self;
     if (insulationCpuMode == 2) { %orig(MAX(power, InsulationUnrestrictedPowerTarget)); return; }
     %orig(power);
 }
 
 - (void)setCPUPowerCeiling:(int)power fromDecisionSource:(int)source {
-    g_activeMitigationController = self;
     if (insulationCpuMode == 2) { %orig(MAX(power, InsulationUnrestrictedPowerTarget), source); return; }
     %orig(power, source);
 }
 
 - (void)setCPUPowerZoneTarget:(int)power {
-    g_activeMitigationController = self;
     if (insulationCpuMode == 2) { %orig(MAX(power, InsulationUnrestrictedPowerTarget)); return; }
     %orig(power);
 }
 
-- (void)updateCPU {
-    g_activeMitigationController = self;
-    enforceMitigationState();
-    %orig;
-}
-
 %end
+
+
+// =====================================================================
+// 初始化与进程注入
+// =====================================================================
 
 %ctor {
     NSString *processName = [NSProcessInfo processInfo].processName;
     if (![processName isEqualToString:@"thermalmonitord"]) return;
 
     %init;
+
+    // 🚀 [黑科技生效] Hook 底层 C 语言写入函数
+    MSHookFunction((void *)IORegistryEntrySetCFProperty, (void *)hook_IORegistryEntrySetCFProperty, (void **)&orig_IORegistryEntrySetCFProperty);
+
+    // 监听来自桌面的模式切换指令
     int token;
     notify_register_dispatch(NOTIFY_CPU_MODE, &token, dispatch_get_main_queue(), ^(int t) {
         uint64_t state = 0;
         if (notify_get_state(t, &state) == NOTIFY_STATUS_OK) {
             insulationCpuMode = (NSInteger)state;
-            enforceMitigationState();
+            
+            // 收到指令后，主动触发一次底层刷新，立刻让 Hook 拦截生效
+            Class cls = objc_getClass("MitigationController");
+            if (cls && [cls respondsToSelector:@selector(sharedInstance)]) {
+                id controller = [cls performSelector:@selector(sharedInstance)];
+                if (controller && [controller respondsToSelector:@selector(updateCPU)]) {
+                    [controller performSelector:@selector(updateCPU)];
+                }
+            }
         }
     });
 
@@ -147,13 +129,4 @@ static void enforceMitigationState(void) {
     if (notify_get_state(token, &initialState) == NOTIFY_STATUS_OK) {
         insulationCpuMode = (NSInteger)initialState;
     }
-
-    // 🚀 死守反击定时器：每 1 秒在底层发一次冲击，系统改回多少次我就压回去多少次！
-    dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
-    dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 1.0 * NSEC_PER_SEC), 1.0 * NSEC_PER_SEC, 0.1 * NSEC_PER_SEC);
-    dispatch_source_set_event_handler(timer, ^{
-        enforceMitigationState();
-    });
-    dispatch_resume(timer);
 }
-
