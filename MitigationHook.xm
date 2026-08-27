@@ -55,22 +55,24 @@ static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry
         }
     }
 
-    // 🚀 [BUG 3 Fix] 强力打破 iOS 电池优化与高温断流
+    // 🚀 强力打破 iOS 80% 优化电池充电 (OBC) 与 高温断流 
     if (forceFastCharge) {
-        // iOS 经常会在 70%、80% 或者发热时下发 500mA 的限流指令
-        if ([propStr containsString:@"ChargeCurrent"] ||
-            [propStr containsString:@"ChargeLimit"] ||
-            [propStr containsString:@"MaxCharge"] ||
-            [propStr containsString:@"ChargeRate"]) {
-            // 直接覆盖系统指令，强写 5000mA 进去，榨干主板快充极限
-            orig_IORegistryEntrySetCFProperty(entry, propertyName, (__bridge CFTypeRef)@(5000));
-            return KERN_SUCCESS;
+        // 强制写入硬件 100% 充电阈值，粉碎 80% 限位锁
+        if ([propStr containsString:@"ChargeLimit"] || [propStr containsString:@"MaxCharge"]) {
+            return orig_IORegistryEntrySetCFProperty(entry, propertyName, (__bridge CFTypeRef)@(100));
         }
         
-        // 粉碎 iOS 原生的"优化电池充电"休眠机制
-        if ([propStr containsString:@"ChargeInhibit"] || [propStr containsString:@"SmartCharge"]) {
-            orig_IORegistryEntrySetCFProperty(entry, propertyName, kCFBooleanFalse);
-            return KERN_SUCCESS;
+        // 粉碎 iOS 原生的 "优化电池充电" 休眠机制、高温断充机制
+        if ([propStr containsString:@"ChargeInhibit"] || 
+            [propStr containsString:@"SmartCharge"] || 
+            [propStr containsString:@"EnforceDisableOBC"]) {
+            return orig_IORegistryEntrySetCFProperty(entry, propertyName, kCFBooleanFalse);
+        }
+
+        // iOS 会在发热或 80% 附近下发小电流保护，强制打回最高档
+        if ([propStr containsString:@"ChargeCurrent"] || [propStr containsString:@"ChargeRate"]) {
+            // 拦截一切试图减小电流的底层参数传递
+            return KERN_SUCCESS; 
         }
     }
 
