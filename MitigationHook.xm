@@ -13,7 +13,7 @@ static int gNotifyToken = -1;
 typedef mach_port_t io_registry_entry_t;
 extern "C" kern_return_t IORegistryEntrySetCFProperty(io_registry_entry_t entry, CFStringRef propertyName, CFTypeRef property);
 
-// 👑 同步强读 64 位加密内核通信指令
+// 同步强读 64 位加密内核通信指令
 static uint64_t getRealTimeState() {
     if (gNotifyToken == -1) {
         notify_register_check(NOTIFY_CPU_MODE, &gNotifyToken);
@@ -23,17 +23,14 @@ static uint64_t getRealTimeState() {
     return state;
 }
 
-// 提取 CPU 模式 (前8位)
 static NSInteger getRealTimeMitigationMode() {
     return getRealTimeState() & 0xFF;
 }
 
-// 提取 是否拦截温控暗屏 (第9位)
 static BOOL getRealTimeBlockDimming() {
     return (getRealTimeState() >> 8) & 1;
 }
 
-// 🟢 提取 是否强制满血快充 (第10位)
 static BOOL getRealTimeForceFastCharge() {
     return (getRealTimeState() >> 9) & 1;
 }
@@ -46,42 +43,39 @@ static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry
 
     NSInteger mode = getRealTimeMitigationMode();
     BOOL blockDimming = getRealTimeBlockDimming();
-    BOOL forceFastCharge = getRealTimeForceFastCharge(); // 读取我们在面板里设置的快充开关
+    BOOL forceFastCharge = getRealTimeForceFastCharge(); 
     NSString *propStr = (__bridge NSString *)propertyName;
     
-    // 👑 彻底治愈“温控暗屏锁不住”！强行扔掉所有底层显示驱动的降亮指令
+    // 🟢 [BUG 2 Fix] 彻底治愈温控暗屏！强行扔掉所有底层显示驱动的降亮限制
     if (blockDimming) {
-        if ([propStr isEqualToString:@"max-brightness"] ||
-            [propStr isEqualToString:@"brightness-limit"] ||
-            [propStr isEqualToString:@"IOMFB_brightness_limit"] ||
-            [propStr isEqualToString:@"ThermalMitigation"] ||
-            [propStr isEqualToString:@"ThermalLimit"]) {
-            return KERN_SUCCESS; // 拦截并骗苹果底层已成功
+        if ([propStr containsString:@"brightness"] ||
+            [propStr containsString:@"Thermal"] ||
+            [propStr containsString:@"Mitigation"] ||
+            [propStr containsString:@"Limit"]) {
+            return KERN_SUCCESS; // 拦截并骗苹果底层已成功下发指令
         }
     }
 
-    // 🚀 【独家】强制满血快充机制：干掉系统针对电池发热的限流！
+    // 🟢 [BUG 3 Fix] 【独家】满血快充绕过 70% 电池降速
+    // iOS 电池到 70% ~ 80% 或发热时，会自动下发很小的充电限制（如 500mA）。
+    // 我们不仅拦截降流指令，还强行把它锁在极高值 5000mA (5A)，强迫主板芯片硬件跑满原装功率！
     if (forceFastCharge) {
-        if ([propStr isEqualToString:@"MaxChargeCurrent"] ||
-            [propStr isEqualToString:@"NominalChargeCurrent"] ||
-            [propStr isEqualToString:@"ChargeCurrentLimit"] ||
-            [propStr isEqualToString:@"ChargeLimit"] ||
-            [propStr isEqualToString:@"ChargeRate"]) {
-            // 直接将 thermalmonitord (系统温控中心) 发给电池限制电流的指令扔进垃圾桶
-            // 系统以为限流了，实际上电池硬件将一直按照原装线材的最大协议物理跑满
+        if ([propStr containsString:@"ChargeCurrent"] ||
+            [propStr containsString:@"ChargeLimit"] ||
+            [propStr containsString:@"MaxCharge"] ||
+            [propStr containsString:@"ChargeRate"]) {
+            orig_IORegistryEntrySetCFProperty(entry, propertyName, (__bridge CFTypeRef)@(5000));
             return KERN_SUCCESS;
         }
     }
 
     if (mode == 1) { 
-        // 模拟低频模式：死死按住 Level 2
         if ([propStr isEqualToString:@"p-state-cap"] || [propStr isEqualToString:@"CPU_Ceiling"] || [propStr isEqualToString:@"CPU_Floor"]) {
             orig_IORegistryEntrySetCFProperty(entry, propertyName, (__bridge CFTypeRef)@(2));
             return KERN_SUCCESS; 
         }
     } 
     else if (mode == 2) { 
-        // 满血防降频模式：强写为无限制
         if ([propStr isEqualToString:@"p-state-cap"] || [propStr isEqualToString:@"CPU_Ceiling"]) {
             orig_IORegistryEntrySetCFProperty(entry, propertyName, (__bridge CFTypeRef)@(15));
             return KERN_SUCCESS; 
