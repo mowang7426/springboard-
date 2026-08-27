@@ -81,6 +81,7 @@ typedef struct {
 @property (nonatomic, strong) UILabel *cpuValueLabel;
 @property (nonatomic, strong) UILabel *cpuFreqLabel;
 @property (nonatomic, strong) UIView *div1;
+@property (nonatomic, strong) UILabel *fpsTitleLabel; 
 @property (nonatomic, strong) UILabel *fpsValueLabel;
 @property (nonatomic, strong) UILabel *fpsSubLabel;
 @property (nonatomic, strong) UIView *divFps;
@@ -88,7 +89,8 @@ typedef struct {
 @property (nonatomic, strong) UILabel *batteryValueLabel;
 @property (nonatomic, strong) UILabel *batterySubLabel;
 @property (nonatomic, strong) UIView *div2;
-@property (nonatomic, strong) UILabel *tempIconLabel;
+// 🟢 改为 UIImageView 以支持原生的正向温度计图标
+@property (nonatomic, strong) UIImageView *tempIconImageView; 
 @property (nonatomic, strong) UILabel *tempValueLabel;
 @property (nonatomic, strong) UILabel *tempSubLabel;
 @property (nonatomic, strong) UIView *div3;
@@ -150,7 +152,6 @@ static BOOL isEnabled = YES;
 static CGFloat floatingScale = 1.0;
 static CGFloat floatingFontSize = 13.0;
 
-// 🟢 新增：自定义圆角参数，默认给个 16 呈现圆角矩形
 static CGFloat floatingCornerRadius = 16.0f; 
 
 static BOOL settingsShowing = NO;
@@ -159,11 +160,10 @@ static BOOL previousChargingState = NO;
 
 static BOOL autoCollapseEnable = YES;
 static NSInteger autoCollapseDelay = 4;
-static NSInteger collapsedDisplayMode = 0; // 0=CPU, 1=FPS, 2=温度, 3=电流
+static NSInteger collapsedDisplayMode = 0; 
 
-// 🟢 横屏游戏自动展开开关
 static BOOL autoExpandLandscape = YES;
-static BOOL wasLandscape = NO; // 用于记录横竖屏状态变化
+static BOOL wasLandscape = NO; 
 
 static BOOL autoLogoutEnable = NO;
 static double logoutCPUThreshold = 100.0;
@@ -172,7 +172,7 @@ static NSDate *cpuHighStartTime = nil;
 static BOOL logoutCounting = NO;
 
 static BOOL floatingAlphaEnable = YES;
-static CGFloat floatingAlpha = 0.70f;
+static CGFloat floatingAlpha = 0.85f; // 液态玻璃质感，稍微提升一点不透明度更好看
 
 static BOOL keyboardAvoidEnable = YES;
 static BOOL smartDockEnable = YES;
@@ -192,6 +192,7 @@ static BOOL forceSunlightHBM = NO;
 
 static BOOL smartChargeLimitEnable = NO;
 static float smartChargeLimitTemp = 38.0f;
+static BOOL forceFastChargeEnable = NO; // 🟢 强力大招：无视发热满血快充
 static BOOL isCurrentlyChargeInhibited = NO;      
 
 static BOOL showBatteryPercent = YES;
@@ -241,17 +242,16 @@ static double getBatteryTemperatureInternal(void);
 static double getBatteryCurrentInternal(void);
 static BOOL isChargingInternal(void);
 
-// 🟢 修改为单进程专属检测
 static double getSpringBoardCPUUsage(void);
 static double getRealCPUFrequency(double currentCpuUsage);
 static void setHardwareChargingInhibit(BOOL inhibit);
 static NSString *getNetworkType(void);
 
-// 👑 跨进程内核通信 (Bit-packing 核心)
-static void SendCPUModeToDaemon(NSInteger mode, BOOL blockDimming) {
+// 👑 跨进程内核通信：加入 forceFastChargeEnable (第 9 位)
+static void SendCPUModeToDaemon(NSInteger mode, BOOL blockDimming, BOOL forceFastCharge) {
     int token;
     if (notify_register_check(NOTIFY_CPU_MODE, &token) == NOTIFY_STATUS_OK) {
-        uint64_t state = (mode & 0xFF) | ((blockDimming ? 1ULL : 0) << 8);
+        uint64_t state = (mode & 0xFF) | ((blockDimming ? 1ULL : 0) << 8) | ((forceFastCharge ? 1ULL : 0) << 9);
         notify_set_state(token, state);
         notify_post(NOTIFY_CPU_MODE);
         notify_cancel(token);
@@ -349,11 +349,10 @@ static void LoadPreferences(void) {
     logoutDuration = getIntPref(CFSTR("logoutDuration"), 60);
     
     floatingAlphaEnable = getBoolPref(CFSTR("floatingAlphaEnable"), YES);
-    floatingAlpha = getFloatPref(CFSTR("floatingAlpha"), 0.70f);
+    floatingAlpha = getFloatPref(CFSTR("floatingAlpha"), 0.85f);
     floatingScale = getFloatPref(CFSTR("floatingScale"), 1.0f);
     floatingFontSize = getFloatPref(CFSTR("floatingFontSize"), 13.0f);
     
-    // 🟢 加载圆角配置
     floatingCornerRadius = getFloatPref(CFSTR("floatingCornerRadius"), 16.0f);
 
     keyboardAvoidEnable = getBoolPref(CFSTR("keyboardAvoidEnable"), YES);
@@ -378,6 +377,7 @@ static void LoadPreferences(void) {
 
     smartChargeLimitEnable = getBoolPref(CFSTR("smartChargeLimitEnable"), NO);
     smartChargeLimitTemp = getFloatPref(CFSTR("smartChargeLimitTemp"), 38.0f);
+    forceFastChargeEnable = getBoolPref(CFSTR("forceFastChargeEnable"), NO); // 🟢 新增强制快充读取
 
     NSString *processName = [NSProcessInfo processInfo].processName;
     if ([processName isEqualToString:@"SpringBoard"]) {
@@ -390,7 +390,7 @@ static void LoadPreferences(void) {
         }
         applySystemRefreshRate();
         
-        SendCPUModeToDaemon(insulationCpuMode, blockThermalDimming);
+        SendCPUModeToDaemon(insulationCpuMode, blockThermalDimming, forceFastChargeEnable);
     }
 }
 
@@ -409,8 +409,6 @@ static void SavePreferencesAndNotify(void) {
     setFloatPref(CFSTR("floatingAlpha"), floatingAlpha);
     setFloatPref(CFSTR("floatingScale"), floatingScale);
     setFloatPref(CFSTR("floatingFontSize"), floatingFontSize);
-
-    // 🟢 保存圆角配置
     setFloatPref(CFSTR("floatingCornerRadius"), floatingCornerRadius);
     
     setBoolPref(CFSTR("keyboardAvoidEnable"), keyboardAvoidEnable);
@@ -435,6 +433,7 @@ static void SavePreferencesAndNotify(void) {
 
     setBoolPref(CFSTR("smartChargeLimitEnable"), smartChargeLimitEnable);
     setFloatPref(CFSTR("smartChargeLimitTemp"), smartChargeLimitTemp);
+    setBoolPref(CFSTR("forceFastChargeEnable"), forceFastChargeEnable); // 🟢 强力满血快充开关保存
     
     CFPreferencesSynchronize(kPrefAppID, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
 
@@ -448,7 +447,7 @@ static void SavePreferencesAndNotify(void) {
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), kPrefChangedNotification, NULL, NULL, YES);
     
     if ([[NSProcessInfo processInfo].processName isEqualToString:@"SpringBoard"]) {
-        SendCPUModeToDaemon(insulationCpuMode, blockThermalDimming);
+        SendCPUModeToDaemon(insulationCpuMode, blockThermalDimming, forceFastChargeEnable);
     }
 }
 
@@ -510,6 +509,10 @@ static NSDictionary *getRealBatteryDetails(void) {
                 dict[@"Watts"] = ad[@"Watts"];
                 dict[@"ChargerType"] = ad[@"Description"];
             }
+            double volts = [dict[@"Voltage"] doubleValue] / 1000.0;
+            double amps = [dict[@"Amperage"] doubleValue] / 1000.0;
+            if (amps < 0) amps = -amps;
+            dict[@"CalculatedWatts"] = @(volts * amps);
             CFRelease(prop);
         }
         IOObjectRelease(service);
@@ -556,7 +559,6 @@ static BOOL isDeviceOverheated(void) {
     return getBatteryTemperatureInternal() >= 43.0;
 }
 
-// 👑 [关键修复] 抛弃全局 CPU，使用 task_threads 精准计算 SpringBoard 单一进程 CPU 负载
 static double getSpringBoardCPUUsage(void) {
     kern_return_t kr;
     thread_array_t thread_list;
@@ -585,6 +587,30 @@ static double getSpringBoardCPUUsage(void) {
     
     kr = vm_deallocate(mach_task_self(), (vm_offset_t)thread_list, thread_count * sizeof(thread_t));
     return total_cpu;
+}
+
+static double getTotalCPUUsage(void) {
+    kern_return_t kr;
+    mach_msg_type_number_t count;
+    static host_cpu_load_info_data_t previous_info = {0, 0, 0, 0};
+    host_cpu_load_info_data_t info;
+    
+    count = HOST_CPU_LOAD_INFO_COUNT;
+    kr = host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO, (host_info_t)&info, &count);
+    if (kr != KERN_SUCCESS) return 0.0;
+    
+    natural_t user   = info.cpu_ticks[CPU_STATE_USER] - previous_info.cpu_ticks[CPU_STATE_USER];
+    natural_t system = info.cpu_ticks[CPU_STATE_SYSTEM] - previous_info.cpu_ticks[CPU_STATE_SYSTEM];
+    natural_t idle   = info.cpu_ticks[CPU_STATE_IDLE] - previous_info.cpu_ticks[CPU_STATE_IDLE];
+    natural_t nice   = info.cpu_ticks[CPU_STATE_NICE] - previous_info.cpu_ticks[CPU_STATE_NICE];
+    
+    previous_info = info;
+    
+    double totalTicks = user + system + idle + nice;
+    if (totalTicks <= 0.0) return 0.0;
+    
+    double cpuUsage = (user + system + nice) / totalTicks * 100.0;
+    return cpuUsage;
 }
 
 static double getRealCPUFrequency(double currentCpuUsage) {
@@ -897,7 +923,6 @@ static void updateCPU(void) {
         }
         previousChargingState = charging;
 
-        // 👑 [终极心跳检测修复]：彻底治愈折叠死锁，使用状态比对触发计时器
         if (autoExpandLandscape) {
             UIInterfaceOrientation orientation = getActiveInterfaceOrientation();
             BOOL isLandscape = (orientation == UIInterfaceOrientationLandscapeLeft || orientation == UIInterfaceOrientationLandscapeRight);
@@ -905,7 +930,6 @@ static void updateCPU(void) {
             if (isLandscape && !wasLandscape && floatingView.isCollapsed) {
                 [floatingView expandFromEdgeAnimated:YES];
             } else if (!isLandscape && wasLandscape && !floatingView.isCollapsed) {
-                // 回到竖屏瞬间，强行激活倒计时，破除死锁
                 [floatingView resetInactivityTimer];
             }
             wasLandscape = isLandscape;
@@ -915,6 +939,9 @@ static void updateCPU(void) {
             floatingView.statusLabel.text = @"⚠️ 高温旁路供电中";
             floatingView.statusLabel.textColor = [UIColor systemOrangeColor];
             floatingView.statusDot.backgroundColor = [UIColor systemOrangeColor];
+        } else if (forceFastChargeEnable && charging) {
+            floatingView.statusLabel.text = @"🚀 满血快充绕过限制中";
+            floatingView.statusLabel.textColor = [UIColor systemRedColor];
         }
 
         [floatingView updateDataWithCPU:cpu 
@@ -1093,26 +1120,27 @@ static void applySystemRefreshRate(void) {
         _longPressGesture.delegate = self;
         [self addGestureRecognizer:_longPressGesture];
 
+        // 柔和优雅的阴影 
         self.layer.shadowColor = [UIColor blackColor].CGColor;
-        self.layer.shadowOpacity = 0.35f;
+        self.layer.shadowOpacity = 0.25f;
         self.layer.shadowOffset = CGSizeMake(0, 5);
-        self.layer.shadowRadius = 10.0f;
+        self.layer.shadowRadius = 12.0f;
 
-        UIBlurEffect *blurEffect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterialDark];
+        // 🟢 完美恢复浅色液态玻璃风格
+        UIBlurEffect *blurEffect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight];
         _blurView = [[UIVisualEffectView alloc] initWithEffect:blurEffect];
-        
-        // 🟢 使用全局动态圆角配置
         CGFloat cornerRad = floatingCornerRadius;
         _blurView.layer.cornerRadius = cornerRad;
         _blurView.layer.masksToBounds = YES;
-        _blurView.layer.borderWidth = 0.75f;
-        _blurView.layer.borderColor = [UIColor colorWithWhite:1.0f alpha:0.30f].CGColor;
+        // 加入极细微的白色反光勾边，增加质感
+        _blurView.layer.borderWidth = 0.5f;
+        _blurView.layer.borderColor = [UIColor colorWithWhite:1.0f alpha:0.40f].CGColor;
         _blurView.userInteractionEnabled = NO;
         [self addSubview:_blurView];
 
         _marqueeLayer = [CAShapeLayer layer];
         _marqueeLayer.fillColor = [UIColor clearColor].CGColor;
-        _marqueeLayer.strokeColor = [UIColor colorWithRed:0.2f green:0.95f blue:0.5f alpha:0.95f].CGColor;
+        _marqueeLayer.strokeColor = [UIColor colorWithRed:0.2f green:0.85f blue:0.4f alpha:0.6f].CGColor;
         _marqueeLayer.lineWidth = 2.0f;
         _marqueeLayer.lineDashPattern = @[@14, @8];
         _marqueeLayer.hidden = YES;
@@ -1121,129 +1149,133 @@ static void applySystemRefreshRate(void) {
         UIView *content = _blurView.contentView;
         content.userInteractionEnabled = NO;
 
+        // 🟢 匹配液态白玻璃的深色字体
+        UIColor *titleGrayColor = [UIColor colorWithWhite:0.35 alpha:1.0f];
+        
         _cpuTitleLabel = [[UILabel alloc] init];
         _cpuTitleLabel.text = @"CPU";
-        _cpuTitleLabel.textColor = [UIColor colorWithWhite:0.95f alpha:1.0f];
-        _cpuTitleLabel.font = [UIFont systemFontOfSize:11.5f weight:UIFontWeightBold];
+        _cpuTitleLabel.textColor = titleGrayColor;
+        _cpuTitleLabel.font = [UIFont systemFontOfSize:10 weight:UIFontWeightMedium];
         [content addSubview:_cpuTitleLabel];
 
         _cpuValueLabel = [[UILabel alloc] init];
-        _cpuValueLabel.textColor = [UIColor colorWithRed:0.2f green:0.95f blue:0.5f alpha:1.0f];
-        _cpuValueLabel.font = [UIFont monospacedDigitSystemFontOfSize:14 weight:UIFontWeightBlack];
+        _cpuValueLabel.textColor = [UIColor colorWithRed:0.18f green:0.75f blue:0.35f alpha:1.0f]; 
+        _cpuValueLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightBold];
         _cpuValueLabel.adjustsFontSizeToFitWidth = YES;
         _cpuValueLabel.minimumScaleFactor = 0.5f;
         [content addSubview:_cpuValueLabel];
 
         _cpuFreqLabel = [[UILabel alloc] init];
-        _cpuFreqLabel.textColor = [UIColor colorWithRed:0.22f green:0.74f blue:0.97f alpha:1.0f];
-        _cpuFreqLabel.font = [UIFont monospacedDigitSystemFontOfSize:11 weight:UIFontWeightBold];
+        _cpuFreqLabel.textColor = titleGrayColor;
+        _cpuFreqLabel.font = [UIFont systemFontOfSize:10 weight:UIFontWeightMedium];
         _cpuFreqLabel.adjustsFontSizeToFitWidth = YES;
         _cpuFreqLabel.minimumScaleFactor = 0.5f;
         [content addSubview:_cpuFreqLabel];
 
         _div1 = [[UIView alloc] init];
-        _div1.backgroundColor = [UIColor colorWithWhite:1.0f alpha:0.18f];
+        _div1.backgroundColor = [UIColor colorWithWhite:0.0f alpha:0.1f];
         [content addSubview:_div1];
 
+        _fpsTitleLabel = [[UILabel alloc] init];
+        _fpsTitleLabel.text = @"FPS";
+        _fpsTitleLabel.textColor = titleGrayColor;
+        _fpsTitleLabel.font = [UIFont systemFontOfSize:10 weight:UIFontWeightMedium];
+        [content addSubview:_fpsTitleLabel];
+
         _fpsValueLabel = [[UILabel alloc] init];
-        _fpsValueLabel.textColor = [UIColor colorWithRed:0.85f green:0.55f blue:1.0f alpha:1.0f];
-        _fpsValueLabel.font = [UIFont monospacedDigitSystemFontOfSize:13 weight:UIFontWeightBold];
-        _fpsValueLabel.textAlignment = NSTextAlignmentCenter;
+        _fpsValueLabel.textColor = [UIColor colorWithRed:0.47f green:0.33f blue:0.90f alpha:1.0f];
+        _fpsValueLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightBold];
         _fpsValueLabel.adjustsFontSizeToFitWidth = YES;
         _fpsValueLabel.minimumScaleFactor = 0.5f;
         [content addSubview:_fpsValueLabel];
 
         _fpsSubLabel = [[UILabel alloc] init];
         _fpsSubLabel.text = @"FPS";
-        _fpsSubLabel.textColor = [UIColor colorWithWhite:0.65f alpha:1.0f];
-        _fpsSubLabel.font = [UIFont systemFontOfSize:8.5f weight:UIFontWeightMedium];
-        _fpsSubLabel.textAlignment = NSTextAlignmentCenter;
+        _fpsSubLabel.textColor = titleGrayColor;
+        _fpsSubLabel.font = [UIFont systemFontOfSize:10 weight:UIFontWeightMedium];
         [content addSubview:_fpsSubLabel];
 
         _divFps = [[UIView alloc] init];
-        _divFps.backgroundColor = [UIColor colorWithWhite:1.0f alpha:0.18f];
+        _divFps.backgroundColor = [UIColor colorWithWhite:0.0f alpha:0.1f];
         [content addSubview:_divFps];
 
         _batteryIconLabel = [[UILabel alloc] init];
         _batteryIconLabel.text = @"🔋";
-        _batteryIconLabel.font = [UIFont systemFontOfSize:16];
+        _batteryIconLabel.font = [UIFont systemFontOfSize:18];
         [content addSubview:_batteryIconLabel];
 
         _batteryValueLabel = [[UILabel alloc] init];
-        _batteryValueLabel.textColor = [UIColor whiteColor];
-        _batteryValueLabel.font = [UIFont monospacedDigitSystemFontOfSize:13 weight:UIFontWeightBold];
+        _batteryValueLabel.textColor = [UIColor colorWithRed:0.15f green:0.45f blue:0.25f alpha:1.0f];
+        _batteryValueLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightBold];
         _batteryValueLabel.adjustsFontSizeToFitWidth = YES;
         _batteryValueLabel.minimumScaleFactor = 0.5f;
         [content addSubview:_batteryValueLabel];
 
         _batterySubLabel = [[UILabel alloc] init];
         _batterySubLabel.text = @"电量";
-        _batterySubLabel.textColor = [UIColor colorWithWhite:0.65f alpha:1.0f];
-        _batterySubLabel.font = [UIFont systemFontOfSize:8.5f weight:UIFontWeightMedium];
+        _batterySubLabel.textColor = titleGrayColor;
+        _batterySubLabel.font = [UIFont systemFontOfSize:10 weight:UIFontWeightMedium];
         [content addSubview:_batterySubLabel];
 
         _div2 = [[UIView alloc] init];
-        _div2.backgroundColor = [UIColor colorWithWhite:1.0f alpha:0.18f];
+        _div2.backgroundColor = [UIColor colorWithWhite:0.0f alpha:0.1f];
         [content addSubview:_div2];
 
-        _tempIconLabel = [[UILabel alloc] init];
-        _tempIconLabel.text = @"🌡";
-        _tempIconLabel.font = [UIFont systemFontOfSize:16];
-        _tempIconLabel.textAlignment = NSTextAlignmentCenter;
-        _tempIconLabel.adjustsFontSizeToFitWidth = YES;
-        _tempIconLabel.minimumScaleFactor = 0.5f;
-        [content addSubview:_tempIconLabel];
+        // 🟢 加入 Apple 原生高颜值正向温度计 (SF Symbols)
+        UIImage *tempImage = [UIImage systemImageNamed:@"thermometer.medium"];
+        _tempIconImageView = [[UIImageView alloc] initWithImage:tempImage];
+        // 给它一点渐变红的质感，不那么死板
+        _tempIconImageView.tintColor = [UIColor colorWithRed:1.0f green:0.3f blue:0.3f alpha:1.0f]; 
+        _tempIconImageView.contentMode = UIViewContentModeScaleAspectFit;
+        [content addSubview:_tempIconImageView];
 
         _tempValueLabel = [[UILabel alloc] init];
-        _tempValueLabel.textColor = [UIColor whiteColor];
-        _tempValueLabel.font = [UIFont monospacedDigitSystemFontOfSize:13 weight:UIFontWeightBold];
+        _tempValueLabel.textColor = [UIColor blackColor];
+        _tempValueLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightBold];
         _tempValueLabel.adjustsFontSizeToFitWidth = YES;
         _tempValueLabel.minimumScaleFactor = 0.5f;
         [content addSubview:_tempValueLabel];
 
         _tempSubLabel = [[UILabel alloc] init];
         _tempSubLabel.text = @"温度";
-        _tempSubLabel.textColor = [UIColor colorWithWhite:0.65f alpha:1.0f];
-        _tempSubLabel.font = [UIFont systemFontOfSize:8.5f weight:UIFontWeightMedium];
+        _tempSubLabel.textColor = titleGrayColor;
+        _tempSubLabel.font = [UIFont systemFontOfSize:10 weight:UIFontWeightMedium];
         [content addSubview:_tempSubLabel];
 
         _div3 = [[UIView alloc] init];
-        _div3.backgroundColor = [UIColor colorWithWhite:1.0f alpha:0.18f];
+        _div3.backgroundColor = [UIColor colorWithWhite:0.0f alpha:0.1f];
         [content addSubview:_div3];
 
         _currentIconLabel = [[UILabel alloc] init];
         _currentIconLabel.text = @"⚡";
-        _currentIconLabel.font = [UIFont systemFontOfSize:15];
+        _currentIconLabel.font = [UIFont systemFontOfSize:16];
         [content addSubview:_currentIconLabel];
 
         _currentValueLabel = [[UILabel alloc] init];
-        _currentValueLabel.textColor = [UIColor colorWithRed:1.0f green:0.85f blue:0.25f alpha:1.0f];
-        _currentValueLabel.font = [UIFont monospacedDigitSystemFontOfSize:12.5f weight:UIFontWeightBold];
+        _currentValueLabel.textColor = [UIColor blackColor];
+        _currentValueLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightBold];
         _currentValueLabel.adjustsFontSizeToFitWidth = YES;
         _currentValueLabel.minimumScaleFactor = 0.5f;
         [content addSubview:_currentValueLabel];
 
         _currentSubLabel = [[UILabel alloc] init];
         _currentSubLabel.text = @"电流";
-        _currentSubLabel.textColor = [UIColor colorWithWhite:0.65f alpha:1.0f];
-        _currentSubLabel.font = [UIFont systemFontOfSize:8.5f weight:UIFontWeightMedium];
+        _currentSubLabel.textColor = titleGrayColor;
+        _currentSubLabel.font = [UIFont systemFontOfSize:10 weight:UIFontWeightMedium];
         [content addSubview:_currentSubLabel];
 
         _bottomCapsule = [[UIView alloc] init];
-        _bottomCapsule.backgroundColor = [UIColor colorWithWhite:1.0f alpha:0.10f];
-        _bottomCapsule.layer.cornerRadius = 10.0f;
+        _bottomCapsule.backgroundColor = [UIColor colorWithRed:0.1f green:0.8f blue:0.4f alpha:0.15f];
         _bottomCapsule.layer.masksToBounds = YES;
-        _bottomCapsule.layer.borderWidth = 0.5f;
-        _bottomCapsule.layer.borderColor = [UIColor colorWithWhite:1.0f alpha:0.12f].CGColor;
+        _bottomCapsule.layer.borderWidth = 0.0f;
         [content addSubview:_bottomCapsule];
 
         _batteryProgressView = [[UIView alloc] init];
-        _batteryProgressView.backgroundColor = [UIColor colorWithRed:0.2f green:0.95f blue:0.5f alpha:0.32f];
-        _batteryProgressView.layer.cornerRadius = 10.0f;
+        _batteryProgressView.backgroundColor = [UIColor colorWithRed:0.1f green:0.8f blue:0.4f alpha:0.3f];
         [_bottomCapsule addSubview:_batteryProgressView];
 
         _statusLabel = [[UILabel alloc] init];
-        _statusLabel.textColor = [UIColor colorWithRed:0.2f green:0.95f blue:0.5f alpha:1.0f];
+        _statusLabel.textColor = [UIColor colorWithRed:0.15f green:0.65f blue:0.3f alpha:1.0f];
         _statusLabel.font = [UIFont systemFontOfSize:10 weight:UIFontWeightMedium];
         _statusLabel.textAlignment = NSTextAlignmentCenter;
         [_bottomCapsule addSubview:_statusLabel];
@@ -1255,12 +1287,12 @@ static void applySystemRefreshRate(void) {
 
         _statusDot = [[UIView alloc] initWithFrame:CGRectMake(8, 9, 10, 10)];
         _statusDot.layer.cornerRadius = 5.0f;
-        _statusDot.backgroundColor = [UIColor colorWithRed:0.2f green:0.95f blue:0.5f alpha:1.0f];
+        _statusDot.backgroundColor = [UIColor blackColor];
         [_collapsedContainerView addSubview:_statusDot];
 
         _miniCpuLabel = [[UILabel alloc] initWithFrame:CGRectMake(22, 5, 45, 18)]; 
-        _miniCpuLabel.textColor = [UIColor whiteColor];
-        _miniCpuLabel.font = [UIFont monospacedDigitSystemFontOfSize:11.5f weight:UIFontWeightBold];
+        _miniCpuLabel.textColor = [UIColor blackColor];
+        _miniCpuLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightBold];
         _miniCpuLabel.textAlignment = NSTextAlignmentLeft;
         [_collapsedContainerView addSubview:_miniCpuLabel];
 
@@ -1301,10 +1333,9 @@ static void applySystemRefreshRate(void) {
     }
 }
 
-// 👑 [关键修复] 彻底解决定时器对象释放导致的折叠死锁
 - (void)inactivityTimerFired {
     [_inactivityTimer invalidate];
-    _inactivityTimer = nil; // 必须手动置空，否则后续逻辑会认为倒计时依然在跑
+    _inactivityTimer = nil; 
 
     if (!settingsShowing && !detailShowing && !_isCollapsed) {
         UIInterfaceOrientation orientation = getActiveInterfaceOrientation();
@@ -1344,6 +1375,7 @@ static void applySystemRefreshRate(void) {
         self.cpuValueLabel.alpha = 0.0;
         self.cpuFreqLabel.alpha = 0.0;
         self.div1.alpha = 0.0;
+        self.fpsTitleLabel.alpha = 0.0;
         self.fpsValueLabel.alpha = 0.0;
         self.fpsSubLabel.alpha = 0.0;
         self.divFps.alpha = 0.0;
@@ -1351,7 +1383,7 @@ static void applySystemRefreshRate(void) {
         self.batteryValueLabel.alpha = 0.0;
         self.batterySubLabel.alpha = 0.0;
         self.div2.alpha = 0.0;
-        self.tempIconLabel.alpha = 0.0;
+        self.tempIconImageView.alpha = 0.0;
         self.tempValueLabel.alpha = 0.0;
         self.tempSubLabel.alpha = 0.0;
         self.div3.alpha = 0.0;
@@ -1365,7 +1397,6 @@ static void applySystemRefreshRate(void) {
 
         self.blurView.frame = CGRectMake(0, 0, targetW, targetH);
         
-        // 🟢 折叠状态圆角智能自适应限制
         CGFloat cornerRad = floatingCornerRadius;
         if (cornerRad > targetH / 2.0f) cornerRad = targetH / 2.0f;
         
@@ -1385,6 +1416,7 @@ static void applySystemRefreshRate(void) {
             self.cpuValueLabel.hidden = YES;
             self.cpuFreqLabel.hidden = YES;
             self.div1.hidden = YES;
+            self.fpsTitleLabel.hidden = YES;
             self.fpsValueLabel.hidden = YES;
             self.fpsSubLabel.hidden = YES;
             self.divFps.hidden = YES;
@@ -1392,7 +1424,7 @@ static void applySystemRefreshRate(void) {
             self.batteryValueLabel.hidden = YES;
             self.batterySubLabel.hidden = YES;
             self.div2.hidden = YES;
-            self.tempIconLabel.hidden = YES;
+            self.tempIconImageView.hidden = YES;
             self.tempValueLabel.hidden = YES;
             self.tempSubLabel.hidden = YES;
             self.div3.hidden = YES;
@@ -1427,6 +1459,7 @@ static void applySystemRefreshRate(void) {
     self.cpuFreqLabel.hidden = !showCpuFrequency;
     self.div1.hidden = NO;
     
+    self.fpsTitleLabel.hidden = !showFps;
     self.fpsValueLabel.hidden = !showFps;
     self.fpsSubLabel.hidden = !showFps;
 
@@ -1434,7 +1467,7 @@ static void applySystemRefreshRate(void) {
     self.batteryValueLabel.hidden = !showBatteryPercent;
     self.batterySubLabel.hidden = !showBatteryPercent;
     
-    self.tempIconLabel.hidden = !showBatteryTemperature;
+    self.tempIconImageView.hidden = !showBatteryTemperature;
     self.tempValueLabel.hidden = !showBatteryTemperature;
     self.tempSubLabel.hidden = !showBatteryTemperature;
 
@@ -1472,6 +1505,7 @@ static void applySystemRefreshRate(void) {
         self.cpuValueLabel.alpha = 1.0;
         self.cpuFreqLabel.alpha = 1.0;
         self.div1.alpha = 1.0;
+        self.fpsTitleLabel.alpha = 1.0;
         self.fpsValueLabel.alpha = 1.0;
         self.fpsSubLabel.alpha = 1.0;
         self.divFps.alpha = 1.0;
@@ -1479,7 +1513,7 @@ static void applySystemRefreshRate(void) {
         self.batteryValueLabel.alpha = 1.0;
         self.batterySubLabel.alpha = 1.0;
         self.div2.alpha = 1.0;
-        self.tempIconLabel.alpha = 1.0;
+        self.tempIconImageView.alpha = 1.0;
         self.tempValueLabel.alpha = 1.0;
         self.tempSubLabel.alpha = 1.0;
         self.div3.alpha = 1.0;
@@ -1573,7 +1607,7 @@ static void applySystemRefreshRate(void) {
 
     CABasicAnimation *glowAnim = [CABasicAnimation animationWithKeyPath:@"borderColor"];
     glowAnim.fromValue = (id)[UIColor colorWithRed:0.2f green:0.95f blue:0.5f alpha:1.0f].CGColor;
-    glowAnim.toValue = (id)[UIColor colorWithWhite:1.0f alpha:0.30f].CGColor;
+    glowAnim.toValue = (id)[UIColor colorWithWhite:1.0f alpha:0.40f].CGColor;
     glowAnim.duration = 0.7;
     [_blurView.layer addAnimation:glowAnim forKey:@"borderGlow"];
 }
@@ -1587,6 +1621,7 @@ static void applySystemRefreshRate(void) {
     if (_isCollapsed) return;
 
     _cpuFreqLabel.hidden = !showFreq;
+    _fpsTitleLabel.hidden = !showFps;
     _fpsValueLabel.hidden = !showFps;
     _fpsSubLabel.hidden = !showFps;
 
@@ -1594,7 +1629,7 @@ static void applySystemRefreshRate(void) {
     _batteryValueLabel.hidden = !showBattery;
     _batterySubLabel.hidden = !showBattery;
 
-    _tempIconLabel.hidden = !showTemp;
+    _tempIconImageView.hidden = !showTemp;
     _tempValueLabel.hidden = !showTemp;
     _tempSubLabel.hidden = !showTemp;
 
@@ -1605,35 +1640,35 @@ static void applySystemRefreshRate(void) {
 
     _bottomCapsule.hidden = !isCharging;
 
-    CGFloat currentX = 10.0f;
+    CGFloat currentX = 16.0f;
     CGFloat padY = 8.0f;
 
-    CGFloat cpuW = 68.0f;
-    _cpuTitleLabel.frame = CGRectMake(currentX, padY, 28, 14);
-    _cpuValueLabel.frame = CGRectMake(currentX + 28, padY, cpuW - 28, 14);
-
-    if (showFreq) _cpuFreqLabel.frame = CGRectMake(currentX, padY + 15, cpuW, 14);
+    CGFloat cpuW = 54.0f;
+    _cpuTitleLabel.frame = CGRectMake(currentX, padY, cpuW, 12);
+    _cpuValueLabel.frame = CGRectMake(currentX, padY + 12, cpuW, 18);
+    if (showFreq) _cpuFreqLabel.frame = CGRectMake(currentX, padY + 31, cpuW, 12);
     else _cpuFreqLabel.frame = CGRectZero;
     currentX += cpuW + 6.0f;
 
     if (showFps || showBattery || showTemp || actualShowCurrent) {
         _div1.hidden = NO;
-        _div1.frame = CGRectMake(currentX, padY + 2, 0.5f, 26.0f);
-        currentX += 6.5f;
+        _div1.frame = CGRectMake(currentX, padY + 4, 0.5f, 34.0f);
+        currentX += 8.5f;
     } else {
         _div1.hidden = YES;
     }
 
     if (showFps) {
-        CGFloat fpsW = 28.0f;
-        _fpsValueLabel.frame = CGRectMake(currentX, padY, fpsW, 14);
-        _fpsSubLabel.frame = CGRectMake(currentX, padY + 14, fpsW, 11);
+        CGFloat fpsW = 34.0f;
+        _fpsTitleLabel.frame = CGRectMake(currentX, padY, fpsW, 12);
+        _fpsValueLabel.frame = CGRectMake(currentX, padY + 12, fpsW, 18);
+        _fpsSubLabel.frame = CGRectMake(currentX, padY + 31, fpsW, 12);
         currentX += fpsW + 6.0f;
 
         if (showBattery || showTemp || actualShowCurrent) {
             _divFps.hidden = NO;
-            _divFps.frame = CGRectMake(currentX, padY + 2, 0.5f, 26.0f);
-            currentX += 6.5f;
+            _divFps.frame = CGRectMake(currentX, padY + 4, 0.5f, 34.0f);
+            currentX += 8.5f;
         } else {
             _divFps.hidden = YES;
         }
@@ -1642,16 +1677,16 @@ static void applySystemRefreshRate(void) {
     }
 
     if (showBattery) {
-        CGFloat batW = 48.0f;
-        _batteryIconLabel.frame = CGRectMake(currentX, padY + 3, 16, 22);
-        _batteryValueLabel.frame = CGRectMake(currentX + 18, padY, batW - 18, 14);
-        _batterySubLabel.frame = CGRectMake(currentX + 18, padY + 14, batW - 18, 11);
+        CGFloat batW = 50.0f;
+        _batteryIconLabel.frame = CGRectMake(currentX, padY + 11, 20, 20);
+        _batteryValueLabel.frame = CGRectMake(currentX + 22, padY + 10, batW - 22, 16);
+        _batterySubLabel.frame = CGRectMake(currentX + 22, padY + 27, batW - 22, 12);
         currentX += batW + 6.0f;
 
         if (showTemp || actualShowCurrent) {
             _div2.hidden = NO;
-            _div2.frame = CGRectMake(currentX, padY + 2, 0.5f, 26.0f);
-            currentX += 6.5f;
+            _div2.frame = CGRectMake(currentX, padY + 4, 0.5f, 34.0f);
+            currentX += 8.5f;
         } else {
             _div2.hidden = YES;
         }
@@ -1661,15 +1696,16 @@ static void applySystemRefreshRate(void) {
 
     if (showTemp) {
         CGFloat tempW = 60.0f;
-        _tempIconLabel.frame = CGRectMake(currentX, padY + 2, 20, 22);
-        _tempValueLabel.frame = CGRectMake(currentX + 22, padY, tempW - 22, 14);
-        _tempSubLabel.frame = CGRectMake(currentX + 22, padY + 14, tempW - 22, 11);
+        // 🟢 温度计原图尺寸调整
+        _tempIconImageView.frame = CGRectMake(currentX, padY + 11, 16, 20);
+        _tempValueLabel.frame = CGRectMake(currentX + 22, padY + 10, tempW - 22, 16);
+        _tempSubLabel.frame = CGRectMake(currentX + 22, padY + 27, tempW - 22, 12);
         currentX += tempW + 6.0f;
 
         if (actualShowCurrent) {
             _div3.hidden = NO;
-            _div3.frame = CGRectMake(currentX, padY + 2, 0.5f, 26.0f);
-            currentX += 6.5f;
+            _div3.frame = CGRectMake(currentX, padY + 4, 0.5f, 34.0f);
+            currentX += 8.5f;
         } else {
             _div3.hidden = YES;
         }
@@ -1678,29 +1714,30 @@ static void applySystemRefreshRate(void) {
     }
 
     if (actualShowCurrent) {
-        CGFloat curW = 58.0f;
-        _currentIconLabel.frame = CGRectMake(currentX, padY + 3, 14, 22);
-        _currentValueLabel.frame = CGRectMake(currentX + 16, padY, curW - 16, 14);
-        _currentSubLabel.frame = CGRectMake(currentX + 16, padY + 14, curW - 16, 11);
+        CGFloat curW = 62.0f;
+        _currentIconLabel.frame = CGRectMake(currentX, padY + 12, 16, 20);
+        _currentValueLabel.frame = CGRectMake(currentX + 18, padY + 10, curW - 18, 16);
+        _currentSubLabel.frame = CGRectMake(currentX + 18, padY + 27, curW - 18, 12);
         currentX += curW + 6.0f;
     }
 
-    CGFloat finalW = currentX + 4.0f;
+    CGFloat finalW = currentX + 10.0f; 
     if (finalW < 40.0f) finalW = 40.0f;
-    CGFloat currentY = padY + 28.0f;
+    CGFloat currentY = padY + 44.0f; 
 
     if (isCharging) {
-        currentY += 6.0f;
-        _bottomCapsule.frame = CGRectMake(10.0f, currentY, finalW - 20.0f, 22.0f);
-        _statusLabel.frame = CGRectMake(0, 1, finalW - 20.0f, 20.0f);
-        currentY += 22.0f;
+        currentY += 4.0f;
+        _bottomCapsule.layer.cornerRadius = 7.0f;
+        _batteryProgressView.layer.cornerRadius = 7.0f;
+        _bottomCapsule.frame = CGRectMake(12.0f, currentY, finalW - 24.0f, 14.0f);
+        _statusLabel.frame = CGRectMake(0, 0, finalW - 24.0f, 14.0f);
+        currentY += 14.0f;
     }
 
-    currentY += 6.0f;
+    currentY += 10.0f; 
 
     _blurView.frame = CGRectMake(0, 0, finalW, currentY);
     
-    // 🟢 展开状态圆角自适应 (防止用户滑块设太大导致破版)
     CGFloat cornerRad = floatingCornerRadius;
     if (cornerRad > currentY / 2.0f) cornerRad = currentY / 2.0f;
     
@@ -1737,22 +1774,27 @@ static void applySystemRefreshRate(void) {
                isCharging:(BOOL)isCharging {
     
     _cpuValueLabel.text = [NSString stringWithFormat:@"%.1f%%", cpu];
-    _cpuValueLabel.textColor = (cpu >= 80.0) ? [UIColor systemRedColor] : [UIColor colorWithRed:0.2f green:0.95f blue:0.5f alpha:1.0f];
+    _cpuValueLabel.textColor = (cpu >= 80.0) ? [UIColor systemRedColor] : [UIColor colorWithRed:0.18f green:0.75f blue:0.35f alpha:1.0f];
 
     _cpuFreqLabel.text = [NSString stringWithFormat:@"%.0f MHz", cpuFreq];
     _fpsValueLabel.text = [NSString stringWithFormat:@"%.0f", fps];
     _batteryValueLabel.text = [NSString stringWithFormat:@"%ld%%", (long)battery];
     _tempValueLabel.text = (temp > 0) ? [NSString stringWithFormat:@"%.1f°C", temp] : @"--°C";
-    _currentValueLabel.text = [NSString stringWithFormat:@"%.0fmA", current];
+    _currentValueLabel.text = [NSString stringWithFormat:@"%.0f mA", current];
     
     if (!isCurrentlyChargeInhibited) {
-        _statusLabel.text = isCharging ? @"🟢 正在充电" : @"⚪ 未在充电";
-        _statusLabel.textColor = [UIColor colorWithRed:0.2f green:0.95f blue:0.5f alpha:1.0f];
+        if (forceFastChargeEnable && isCharging) {
+            _statusLabel.text = @"⚡ 满血快充绕过限制中";
+            _statusLabel.textColor = [UIColor colorWithRed:1.0f green:0.2f blue:0.2f alpha:1.0f];
+        } else {
+            _statusLabel.text = isCharging ? @"正在充电" : @"未在充电";
+            _statusLabel.textColor = [UIColor colorWithRed:0.15f green:0.65f blue:0.3f alpha:1.0f];
+        }
     }
 
     if (isCharging) {
         CGFloat capsuleW = _bottomCapsule.bounds.size.width;
-        CGFloat capsuleH = _bottomCapsule.bounds.size.height > 0 ? _bottomCapsule.bounds.size.height : 22.0f;
+        CGFloat capsuleH = _bottomCapsule.bounds.size.height > 0 ? _bottomCapsule.bounds.size.height : 14.0f;
         CGFloat targetProgressW = MAX(0, MIN(capsuleW, capsuleW * (battery / 100.0f)));
         
         [UIView animateWithDuration:0.35 animations:^{
@@ -1771,10 +1813,10 @@ static void applySystemRefreshRate(void) {
     }
     
     if (!isCurrentlyChargeInhibited) {
-        UIColor *statusColor = [UIColor colorWithRed:0.22f green:0.74f blue:0.97f alpha:1.0f];
-        if (isCharging) statusColor = [UIColor colorWithRed:0.2f green:0.95f blue:0.5f alpha:1.0f];
-        else if (cpu >= 80.0 || temp >= 42.0) statusColor = [UIColor colorWithRed:1.0f green:0.23f blue:0.19f alpha:1.0f];
-        else if (temp >= 38.0) statusColor = [UIColor colorWithRed:1.0f green:0.62f blue:0.04f alpha:1.0f];
+        UIColor *statusColor = [UIColor darkGrayColor];
+        if (isCharging) statusColor = forceFastChargeEnable ? [UIColor systemRedColor] : [UIColor colorWithRed:0.0f green:0.8f blue:0.4f alpha:1.0f];
+        else if (cpu >= 80.0 || temp >= 42.0) statusColor = [UIColor systemRedColor];
+        else if (temp >= 38.0) statusColor = [UIColor systemOrangeColor];
         _statusDot.backgroundColor = statusColor;
     }
 }
@@ -1787,7 +1829,7 @@ static void applySystemRefreshRate(void) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.view.backgroundColor = [UIColor colorWithWhite:0 alpha:0.4];
+    self.view.backgroundColor = [UIColor colorWithWhite:0 alpha:0.25];
     _labelsDict = [NSMutableDictionary dictionary];
 
     if ([CMPedometer isStepCountingAvailable]) {
@@ -1803,13 +1845,13 @@ static void applySystemRefreshRate(void) {
     CGFloat panelW = MIN(screenW - margin * 2, 420.0);
     CGFloat panelH = MIN(screenH - margin * 4, 340.0);
 
-    UIBlurEffect *blur = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterialDark];
+    // 🟢 详情页面跟进改成通透奶白液态玻璃风格
+    UIBlurEffect *blur = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialLight];
     _blurEffectView = [[UIVisualEffectView alloc] initWithEffect:blur];
     _blurEffectView.frame = CGRectMake((screenW - panelW)/2.0, (screenH - panelH)/2.0, panelW, panelH);
-    _blurEffectView.layer.cornerRadius = 18.0;
+    _blurEffectView.layer.cornerRadius = 24.0;
     _blurEffectView.layer.masksToBounds = YES;
-    _blurEffectView.layer.borderWidth = 1.0;
-    _blurEffectView.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.18].CGColor;
+    _blurEffectView.layer.borderWidth = 0.0;
     [self.view addSubview:_blurEffectView];
 
     UITapGestureRecognizer *preventTap = [[UITapGestureRecognizer alloc] initWithTarget:nil action:nil];
@@ -1818,21 +1860,21 @@ static void applySystemRefreshRate(void) {
     UIView *contentView = _blurEffectView.contentView;
 
     UILabel *titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 12, panelW - 60, 22)];
-    titleLabel.text = @"⚡ 系统与电池详细状态";
-    titleLabel.textColor = [UIColor whiteColor];
+    titleLabel.text = @"系统与电池详细状态";
+    titleLabel.textColor = [UIColor blackColor];
     titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightBold];
     [contentView addSubview:titleLabel];
 
     UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeCustom];
     closeBtn.frame = CGRectMake(panelW - 38, 10, 26, 26);
     [closeBtn setTitle:@"✕" forState:UIControlStateNormal];
-    [closeBtn setTitleColor:[UIColor colorWithWhite:0.8 alpha:1.0] forState:UIControlStateNormal];
+    [closeBtn setTitleColor:[UIColor darkGrayColor] forState:UIControlStateNormal];
     closeBtn.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightBold];
     [closeBtn addTarget:self action:@selector(closeDetailView) forControlEvents:UIControlEventTouchUpInside];
     [contentView addSubview:closeBtn];
 
     UIView *line = [[UIView alloc] initWithFrame:CGRectMake(0, 40, panelW, 0.5)];
-    line.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.15];
+    line.backgroundColor = [UIColor colorWithWhite:0 alpha:0.1]; // 浅色分割线
     [contentView addSubview:line];
 
     CGFloat colW = (panelW - 20) / 2.0;
@@ -1845,7 +1887,6 @@ static void applySystemRefreshRate(void) {
         @"电池当前电量", @"电池设计容量", @"电池实际容量", @"电池当前容量"
     ];
 
-    // 🟢 文本修改，明确显示是 SpringBoard CPU
     NSArray *rightKeys = @[
         @"设备名称", @"软件版本", @"网络信息", @"内网地址",
         @"实时网速", @"SpringBoard CPU", @"CPU主频 / FPS", @"内存剩余",
@@ -1865,16 +1906,17 @@ static void applySystemRefreshRate(void) {
     }
 }
 
+// 🟢 修改为黑色主题展示
 - (UILabel *)createRowWithTitle:(NSString *)title x:(CGFloat)x y:(CGFloat)y width:(CGFloat)width parent:(UIView *)parent {
     UILabel *keyLbl = [[UILabel alloc] initWithFrame:CGRectMake(x, y, width * 0.46, 20)];
     keyLbl.text = [NSString stringWithFormat:@"%@:", title];
-    keyLbl.textColor = [UIColor colorWithWhite:0.75 alpha:1.0];
+    keyLbl.textColor = [UIColor darkGrayColor];
     keyLbl.font = [UIFont systemFontOfSize:10.5 weight:UIFontWeightMedium];
     keyLbl.adjustsFontSizeToFitWidth = YES;
     [parent addSubview:keyLbl];
 
     UILabel *valLbl = [[UILabel alloc] initWithFrame:CGRectMake(x + width * 0.46, y, width * 0.52, 20)];
-    valLbl.textColor = [UIColor whiteColor];
+    valLbl.textColor = [UIColor blackColor];
     valLbl.font = [UIFont monospacedDigitSystemFontOfSize:10.5 weight:UIFontWeightBold];
     valLbl.adjustsFontSizeToFitWidth = YES;
     valLbl.minimumScaleFactor = 0.5;
@@ -1926,8 +1968,8 @@ static void applySystemRefreshRate(void) {
     double health = (designCap > 0) ? ((double)maxCap / (double)designCap * 100.0) : 100.0;
     if (health > 105.0) health = 100.0;
 
-    NSString *mfg = batInfo[@"Manufacturer"] ?: @"德赛";
-    if (mfg.length == 0) mfg = @"德赛";
+    NSString *mfg = batInfo[@"Manufacturer"] ?: @"Apple";
+    if (mfg.length == 0) mfg = @"Apple";
 
     _labelsDict[@"电池健康程度"].text = [NSString stringWithFormat:@"%.0f%% %@", health, mfg];
 
@@ -1945,7 +1987,11 @@ static void applySystemRefreshRate(void) {
     _labelsDict[@"电池充电类型"].text = charging ? (batInfo[@"ChargerType"] ?: @"PD 快充") : @"未充电";
 
     double watts = [batInfo[@"Watts"] doubleValue];
-    _labelsDict[@"电池充电功率"].text = charging ? [NSString stringWithFormat:@"%.1fW", watts > 0 ? watts : 20.0] : @"0W";
+    double calcWatts = [batInfo[@"CalculatedWatts"] doubleValue];
+    if (watts <= 0.1 && calcWatts > 0) {
+        watts = calcWatts;
+    }
+    _labelsDict[@"电池充电功率"].text = charging ? [NSString stringWithFormat:@"%.1fW", watts] : @"0W";
 
     double currentmA = getBatteryCurrentInternal();
     _labelsDict[@"电池当前电流"].text = [NSString stringWithFormat:@"%.0fmA", currentmA];
@@ -2200,11 +2246,12 @@ static void applySystemRefreshRate(void) {
     (void)tableView;
     if (section == 0) return 4; 
     if (section == 1) return 3;
-    if (section == 2) return 5; // 🟢 把第 2 节（外观）行数从 4 变 5
+    if (section == 2) return 5;
     if (section == 3) return 3;
     if (section == 4) return 2;
     if (section == 5) return 5;
-    if (section == 6) return 2; 
+    // 🟢 电池板块多加了一行（快充）
+    if (section == 6) return 3; 
     return 6;
 }
 
@@ -2229,7 +2276,7 @@ static void applySystemRefreshRate(void) {
         return @"💡 模式说明：\n1. 模拟低电频率：在温控守护进程中锁定 CPU Level 2，真正拉降整机硬件功耗与频率。\n2. 防止温控降频：无论发热多高均把 CPU 保持在 Level 0 满血状态，释放极限性能。";
     }
     if (section == 6) {
-        return @"💡 边充边玩黄金组合：开启高温智能断充后，一旦温度超过阈值，系统将物理切断电池充电改为直接由电源线供电（旁路供电）。配合 Insulation 防降频模块，可实现：大型游戏满帧不暗屏 + 电池不发热鼓包！";
+        return @"💡 边充边玩黄金组合：开启高温智能断充后，一旦温度超过阈值，系统将切断充电（旁路供电）。\n🔥 强制满血快充：利用内核底层技术直接拉黑并拦截手机热量引起的限流指令，满载发烫也强行以最高功率快充！";
     }
     return nil;
 }
@@ -2303,10 +2350,8 @@ static void applySystemRefreshRate(void) {
             cell.accessoryView = slider;
             cell.detailTextLabel.text = [NSString stringWithFormat:@"%.0fpt", floatingFontSize];
         } else if (indexPath.row == 4) {
-            // 🟢 新增：圆角大小调节滑块
             cell.textLabel.text = @"圆角大小";
             UISlider *slider = [[UISlider alloc] initWithFrame:CGRectMake(0,0,130,30)];
-            // 给一个安全范围：4.0最微弱，35.0足以变成标准的药丸胶囊
             slider.minimumValue = 4.0; slider.maximumValue = 35.0; slider.value = floatingCornerRadius;
             [slider addTarget:self action:@selector(changeCornerRadiusSlider:) forControlEvents:UIControlEventValueChanged];
             cell.accessoryView = slider;
@@ -2387,6 +2432,13 @@ static void applySystemRefreshRate(void) {
             cell.textLabel.text = @"断充温度阈值";
             cell.detailTextLabel.text = [NSString stringWithFormat:@"%.1f°C", smartChargeLimitTemp];
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        } else if (indexPath.row == 2) {
+            // 🟢 新增：拦截系统的硬件快充温控
+            cell.textLabel.text = @"强制满血快充 (无视发热)";
+            UISwitch *sw = [UISwitch new];
+            sw.on = forceFastChargeEnable;
+            [sw addTarget:self action:@selector(changeForceFastCharge:) forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = sw;
         }
     } else if (indexPath.section == 7) {
         if (indexPath.row == 0) {
@@ -2472,8 +2524,8 @@ static void applySystemRefreshRate(void) {
     } else if (indexPath.section == 2) {
         if (indexPath.row == 1) {
             UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"透明度" message:@"选择悬浮窗透明度" preferredStyle:UIAlertControllerStyleActionSheet];
-            NSArray *titles = @[@"20%", @"40%", @"60%", @"70%", @"80%", @"100%"];
-            NSArray *values = @[@0.2, @0.4, @0.6, @0.7, @0.8, @1.0];
+            NSArray *titles = @[@"20%", @"40%", @"60%", @"70%", @"85%", @"100%"];
+            NSArray *values = @[@0.2, @0.4, @0.6, @0.7, @0.85, @1.0];
 
             for (NSInteger i = 0; i < titles.count; i++) {
                 [alert addAction:[UIAlertAction actionWithTitle:titles[i] style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
@@ -2559,7 +2611,6 @@ static void applySystemRefreshRate(void) {
     [self performSelector:@selector(saveConfigs) withObject:nil afterDelay:0.5];
 }
 
-// 🟢 新增：响应圆角大小滑动并保存
 - (void)changeCornerRadiusSlider:(UISlider *)slider {
     floatingCornerRadius = slider.value;
     UITableViewCell *cell = (UITableViewCell *)slider.superview;
@@ -2570,7 +2621,6 @@ static void applySystemRefreshRate(void) {
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(saveConfigs) object:nil];
     [self performSelector:@selector(saveConfigs) withObject:nil afterDelay:0.5];
 }
-
 
 - (void)changeAutoCollapse:(UISwitch *)sw {
     autoCollapseEnable = sw.isOn;
@@ -2596,15 +2646,8 @@ static void applySystemRefreshRate(void) {
 - (void)changeSmartDock:(UISwitch *)sw { smartDockEnable = sw.isOn; SavePreferencesAndNotify(); }
 - (void)changeRememberPosition:(UISwitch *)sw { rememberPositionEnable = sw.isOn; SavePreferencesAndNotify(); }
 
-- (void)changeForce120Hz:(UISwitch *)sw {
-    force120HzEnable = sw.isOn;
-    SavePreferencesAndNotify();
-}
-
-- (void)changeThermalProtection:(UISwitch *)sw {
-    thermalProtectionEnable = sw.isOn;
-    SavePreferencesAndNotify();
-}
+- (void)changeForce120Hz:(UISwitch *)sw { force120HzEnable = sw.isOn; SavePreferencesAndNotify(); }
+- (void)changeThermalProtection:(UISwitch *)sw { thermalProtectionEnable = sw.isOn; SavePreferencesAndNotify(); }
 
 - (void)changeShowCpuFreq:(UISwitch *)sw { showCpuFrequency = sw.isOn; SavePreferencesAndNotify(); updateFloatingSize(); }
 - (void)changeShowFps:(UISwitch *)sw { showFps = sw.isOn; SavePreferencesAndNotify(); updateFloatingSize(); }
@@ -2624,6 +2667,11 @@ static void applySystemRefreshRate(void) {
         setHardwareChargingInhibit(NO);
         isCurrentlyChargeInhibited = NO;
     }
+}
+// 🟢 满血快充切换通知内核
+- (void)changeForceFastCharge:(UISwitch *)sw { 
+    forceFastChargeEnable = sw.isOn; 
+    SavePreferencesAndNotify(); 
 }
 
 @end
