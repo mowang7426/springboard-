@@ -1,3 +1,4 @@
+```makefile
 ARCHS = arm64 arm64e
 TARGET = iphone:clang:16.5:14.0
 
@@ -11,11 +12,14 @@ SBCPUFloating_CFLAGS = -fobjc-arc
 SBCPUFloating_FRAMEWORKS = UIKit Foundation QuartzCore CoreMotion
 SBCPUFloating_PRIVATE_FRAMEWORKS = PowerUI IOKit
 
-# 2. 底层温控守护进程 (之前你漏掉的就是这里！)
+# 2. 底层温控守护进程 (⚠️这里增加了 IOKit，用来穿透内核强写)
 SBCPUMitigation_FILES = MitigationHook.xm
 SBCPUMitigation_CFLAGS = -fobjc-arc
 SBCPUMitigation_FRAMEWORKS = Foundation
+SBCPUMitigation_PRIVATE_FRAMEWORKS = IOKit
 
 include $(THEOS_MAKE_PATH)/tweak.mk
 
 INSTALL_TARGET_PROCESSES = SpringBoard thermalmonitord
+
+```
