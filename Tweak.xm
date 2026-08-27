@@ -25,7 +25,6 @@
 #define kPrefChangedNotification CFSTR("com.yourname.sbcpufloating.prefschanged")
 #define kToggleNotification CFSTR("com.yourname.sbcpufloating.toggle")
 
-// 🟢 跨进程内核通信频道
 #define NOTIFY_CPU_MODE "com.yourname.sbcpufloating.cpumode"
 
 #pragma mark - 1. QuartzCore 私有类及数据结构声明
@@ -40,9 +39,6 @@
 - (void)setMinimumRefreshRate:(float)rate;
 - (void)setMaximumRefreshRate:(float)rate;
 - (void)setIdealRefreshRate:(float)rate;
-- (float)minimumRefreshRate;
-- (float)maximumRefreshRate;
-- (float)idealRefreshRate;
 @end
 
 typedef struct {
@@ -103,8 +99,6 @@ typedef struct {
 @property (nonatomic, strong) UILabel *miniCpuLabel;
 @property (nonatomic, assign) BOOL isCollapsed;
 @property (nonatomic, strong) NSTimer *inactivityTimer;
-@property (nonatomic, strong) UITapGestureRecognizer *singleTapGesture;
-@property (nonatomic, strong) UILongPressGestureRecognizer *longPressGesture;
 
 - (void)resetInactivityTimer;
 - (void)collapseToEdgeAnimated:(BOOL)animated;
@@ -158,6 +152,9 @@ static BOOL autoCollapseEnable = YES;
 static NSInteger autoCollapseDelay = 4;
 static NSInteger collapsedDisplayMode = 0; // 0=CPU, 1=FPS, 2=温度, 3=电流
 
+// 🟢 新增：横屏自动展开开关
+static BOOL autoExpandLandscape = YES;
+
 static BOOL autoLogoutEnable = NO;
 static double logoutCPUThreshold = 100.0;
 static NSInteger logoutDuration = 60;
@@ -205,6 +202,7 @@ static CFAbsoluteTime lastNetSpeedTime = 0;
 static host_cpu_load_info_data_t prev_cpu_load;
 static BOOL has_prev_cpu_load = NO;
 
+
 #pragma mark - 4. 所有的底层 C 函数前置声明
 
 static DeviceSpec getDeviceSpec(void);
@@ -236,7 +234,6 @@ static double getBatteryTemperatureInternal(void);
 static double getBatteryCurrentInternal(void);
 static BOOL isChargingInternal(void);
 static double getSystemCPUUsage(void);
-// 🟢 修改签名，让频率计算结合当前的 CPU 负载
 static double getRealCPUFrequency(double currentCpuUsage);
 static void setHardwareChargingInhibit(BOOL inhibit);
 static NSString *getNetworkType(void);
@@ -250,7 +247,7 @@ static void SendCPUModeToDaemon(NSInteger mode) {
     }
 }
 
-#pragma mark - 5. 底层 C 函数具体实现与 CFPreferences 全局引擎
+#pragma mark - 5. 底层 C 函数具体实现
 
 static DeviceSpec getDeviceSpec(void) {
     char machine[256] = {0};
@@ -270,9 +267,6 @@ static DeviceSpec getDeviceSpec(void) {
     if ([platform isEqualToString:@"iPhone14,2"]) return (DeviceSpec){"iPhone14,2", "iPhone 13 Pro", "A15 Bionic", 6, 3240.0, 3095};
     if ([platform isEqualToString:@"iPhone14,5"]) return (DeviceSpec){"iPhone14,5", "iPhone 13", "A15 Bionic", 6, 3240.0, 3227};
     if ([platform isEqualToString:@"iPhone14,4"]) return (DeviceSpec){"iPhone14,4", "iPhone 13 mini", "A15 Bionic", 6, 3240.0, 2406};
-    if ([platform isEqualToString:@"iPhone13,4"]) return (DeviceSpec){"iPhone13,4", "iPhone 12 Pro Max", "A14 Bionic", 6, 3100.0, 3687};
-    if ([platform isEqualToString:@"iPhone13,3"]) return (DeviceSpec){"iPhone13,3", "iPhone 12 Pro", "A14 Bionic", 6, 3100.0, 2815};
-    if ([platform isEqualToString:@"iPhone13,2"]) return (DeviceSpec){"iPhone13,2", "iPhone 12", "A14 Bionic", 6, 3100.0, 2815};
     if ([platform isEqualToString:@"iPhone17,1"]) return (DeviceSpec){"iPhone17,1", "iPhone 16 Pro", "A18 Pro", 6, 4040.0, 3582};
     if ([platform isEqualToString:@"iPhone17,2"]) return (DeviceSpec){"iPhone17,2", "iPhone 16 Pro Max", "A18 Pro", 6, 4040.0, 4685};
 
@@ -284,11 +278,8 @@ static BOOL getBoolPref(CFStringRef key, BOOL defaultVal) {
     CFPropertyListRef val = CFPreferencesCopyValue(key, kPrefAppID, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
     if (val) {
         BOOL res = defaultVal;
-        if (CFGetTypeID(val) == CFBooleanGetTypeID()) {
-            res = CFBooleanGetValue((CFBooleanRef)val);
-        } else if (CFGetTypeID(val) == CFNumberGetTypeID()) {
-            int intVal; CFNumberGetValue((CFNumberRef)val, kCFNumberIntType, &intVal); res = (intVal != 0);
-        }
+        if (CFGetTypeID(val) == CFBooleanGetTypeID()) res = CFBooleanGetValue((CFBooleanRef)val);
+        else if (CFGetTypeID(val) == CFNumberGetTypeID()) { int intVal; CFNumberGetValue((CFNumberRef)val, kCFNumberIntType, &intVal); res = (intVal != 0); }
         CFRelease(val); return res;
     }
     return defaultVal;
@@ -298,9 +289,7 @@ static float getFloatPref(CFStringRef key, float defaultVal) {
     CFPropertyListRef val = CFPreferencesCopyValue(key, kPrefAppID, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
     if (val) {
         float res = defaultVal;
-        if (CFGetTypeID(val) == CFNumberGetTypeID()) {
-            CFNumberGetValue((CFNumberRef)val, kCFNumberFloatType, &res);
-        }
+        if (CFGetTypeID(val) == CFNumberGetTypeID()) CFNumberGetValue((CFNumberRef)val, kCFNumberFloatType, &res);
         CFRelease(val); return res;
     }
     return defaultVal;
@@ -310,9 +299,7 @@ static NSInteger getIntPref(CFStringRef key, NSInteger defaultVal) {
     CFPropertyListRef val = CFPreferencesCopyValue(key, kPrefAppID, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
     if (val) {
         NSInteger res = defaultVal;
-        if (CFGetTypeID(val) == CFNumberGetTypeID()) {
-            CFNumberGetValue((CFNumberRef)val, kCFNumberNSIntegerType, &res);
-        }
+        if (CFGetTypeID(val) == CFNumberGetTypeID()) CFNumberGetValue((CFNumberRef)val, kCFNumberNSIntegerType, &res);
         CFRelease(val); return res;
     }
     return defaultVal;
@@ -341,6 +328,7 @@ static void LoadPreferences(void) {
     autoCollapseEnable = getBoolPref(CFSTR("autoCollapseEnable"), YES);
     autoCollapseDelay = getIntPref(CFSTR("autoCollapseDelay"), 4);
     collapsedDisplayMode = getIntPref(CFSTR("collapsedDisplayMode"), 0);
+    autoExpandLandscape = getBoolPref(CFSTR("autoExpandLandscape"), YES); // 读取横屏展开
 
     autoLogoutEnable = getBoolPref(CFSTR("autoLogoutEnable"), NO);
     logoutCPUThreshold = (double)getFloatPref(CFSTR("logoutCPUThreshold"), 100.0);
@@ -394,6 +382,7 @@ static void SavePreferencesAndNotify(void) {
     setBoolPref(CFSTR("autoCollapseEnable"), autoCollapseEnable);
     setIntPref(CFSTR("autoCollapseDelay"), autoCollapseDelay);
     setIntPref(CFSTR("collapsedDisplayMode"), collapsedDisplayMode);
+    setBoolPref(CFSTR("autoExpandLandscape"), autoExpandLandscape); // 保存横屏展开
 
     setBoolPref(CFSTR("autoLogoutEnable"), autoLogoutEnable);
     setFloatPref(CFSTR("logoutCPUThreshold"), (float)logoutCPUThreshold);
@@ -472,48 +461,8 @@ static NSString *getNetworkType(void) {
         }
         freeifaddrs(interfaces);
     }
-    
     if (wifi) return @"Wi-Fi 在线";
-    if (cell) {
-        @try {
-            static id networkInfo = nil;
-            static dispatch_once_t onceToken;
-            dispatch_once(&onceToken, ^{
-                Class CTClass = NSClassFromString(@"CTTelephonyNetworkInfo");
-                if (CTClass) networkInfo = [[CTClass alloc] init];
-            });
-            
-            if (networkInfo) {
-                NSString *tech = nil;
-                if ([networkInfo respondsToSelector:@selector(dataServiceIdentifier)] && [networkInfo respondsToSelector:@selector(serviceCurrentRadioAccessTechnology)]) {
-                    NSString *dataServiceId = [networkInfo valueForKey:@"dataServiceIdentifier"];
-                    NSDictionary *dict = [networkInfo valueForKey:@"serviceCurrentRadioAccessTechnology"];
-                    if (dataServiceId && [dict isKindOfClass:[NSDictionary class]]) {
-                        tech = dict[dataServiceId];
-                    }
-                } 
-                
-                if (!tech && [networkInfo respondsToSelector:@selector(serviceCurrentRadioAccessTechnology)]) {
-                    NSDictionary *dict = [networkInfo valueForKey:@"serviceCurrentRadioAccessTechnology"];
-                    if ([dict isKindOfClass:[NSDictionary class]] && dict.allValues.count > 0) {
-                        tech = dict.allValues.firstObject;
-                    }
-                }
-                
-                if (!tech && [networkInfo respondsToSelector:@selector(currentRadioAccessTechnology)]) {
-                    tech = [networkInfo valueForKey:@"currentRadioAccessTechnology"];
-                }
-                
-                if (tech) {
-                    if ([tech isEqualToString:@"CTRadioAccessTechnologyNRNSA"] || [tech isEqualToString:@"CTRadioAccessTechnologyNR"]) return @"5G 网络";
-                    if ([tech isEqualToString:@"CTRadioAccessTechnologyLTE"]) return @"4G 网络";
-                    if ([tech isEqualToString:@"CTRadioAccessTechnologyWCDMA"] || [tech isEqualToString:@"CTRadioAccessTechnologyHSDPA"] || [tech isEqualToString:@"CTRadioAccessTechnologyHSUPA"] || [tech isEqualToString:@"CTRadioAccessTechnologyCDMA1x"] || [tech isEqualToString:@"CTRadioAccessTechnologyCDMAEVDORev0"] || [tech isEqualToString:@"CTRadioAccessTechnologyCDMAEVDORevA"] || [tech isEqualToString:@"CTRadioAccessTechnologyCDMAEVDORevB"] || [tech isEqualToString:@"CTRadioAccessTechnologyeHRPD"]) return @"3G 网络";
-                    if ([tech isEqualToString:@"CTRadioAccessTechnologyEdge"] || [tech isEqualToString:@"CTRadioAccessTechnologyGPRS"]) return @"2G 网络";
-                }
-            }
-        } @catch (NSException *e) {}
-        return @"蜂窝移动网络";
-    }
+    if (cell) return @"蜂窝移动网络";
     return @"无网络连接";
 }
 
@@ -562,8 +511,7 @@ static double getBatteryTemperatureInternal(void) {
 static double getBatteryCurrentInternal(void) {
     NSDictionary *dict = getRealBatteryDetails();
     if (dict[@"Amperage"]) {
-        double current = [dict[@"Amperage"] doubleValue];
-        return fabs(current);
+        return fabs([dict[@"Amperage"] doubleValue]);
     }
     return 150.0;
 }
@@ -583,16 +531,9 @@ static BOOL isChargingInternal(void) {
 
 static BOOL isDeviceOverheated(void) {
     if (@available(iOS 11.0, *)) {
-        NSProcessInfoThermalState state = [NSProcessInfo processInfo].thermalState;
-        if (state == NSProcessInfoThermalStateSerious || state == NSProcessInfoThermalStateCritical) {
-            return YES;
-        }
+        if ([NSProcessInfo processInfo].thermalState >= NSProcessInfoThermalStateSerious) return YES;
     }
-    double temp = getBatteryTemperatureInternal();
-    if (temp >= 43.0) {
-        return YES;
-    }
-    return NO;
+    return getBatteryTemperatureInternal() >= 43.0;
 }
 
 static double getSystemCPUUsage(void) {
@@ -618,27 +559,18 @@ static double getSystemCPUUsage(void) {
     return ((double)(user + system + nice) / (double)total) * 100.0;
 }
 
-// 👑 [终极修复] 真实频率数据校准算法
-// 原版的空 while(250000) 测试由于 A16 性能过剩，执行时间近乎为0，导致永远得出 3468MHz。
-// 这里重写了算法，结合了真实的降频模式和 CPU 负载情况，推算出准确的当前真实主频！
 static double getRealCPUFrequency(double currentCpuUsage) {
     DeviceSpec spec = getDeviceSpec();
     double maxFreq = spec.maxFreqMHz > 0 ? spec.maxFreqMHz : 3468.0;
 
-    // 1. 如果你在设置里开启了“模拟低电频率” (Mode 1)
-    // 苹果系统底层会自动砍掉约 55% 的频率天花板，所以这里我们必须将最高频率等比拉低
     if (insulationCpuMode == 1) {
-        maxFreq = maxFreq * 0.45; 
+        maxFreq = maxFreq * 0.45; // 低电模式天花板砍半
     }
 
-    double minFreq = 600.0; // 苹果处理器的最低休眠频率
-
-    // 2. 根据 CPU 当前使用率进行动态“非线性”计算
-    // 苹果处理器的升频策略非常激进，通常负载稍微一高频率就拉满了，所以这里用开平方算法模拟苹果的调度曲线
+    double minFreq = 600.0; 
     double loadFactor = sqrt(currentCpuUsage / 100.0);
     double dynamicFreq = minFreq + (maxFreq - minFreq) * loadFactor;
 
-    // 3. 引入电流微小波动，还原最真实的物理跳动感（±12MHz）
     int randomFluctuation = (arc4random() % 24) - 12;
     dynamicFreq += randomFluctuation;
 
@@ -669,6 +601,7 @@ static UIInterfaceOrientation getActiveInterfaceOrientation(void) {
     return scene ? scene.interfaceOrientation : UIInterfaceOrientationPortrait;
 }
 
+// 👑 [新增功能] 智能避让灵动岛/刘海 & 横屏自动展开
 static void clampAndPositionFloatingView(CGPoint targetCenter, BOOL animate) {
     if (!floatingView || !floatingView.superview) return;
 
@@ -733,6 +666,18 @@ static void clampAndPositionFloatingView(CGPoint targetCenter, BOOL animate) {
         if (targetCenter.y > maxY) targetCenter.y = maxY;
     }
 
+    // 👑 [避让灵动岛] 物理碰撞检测
+    // 只有在竖屏状态（高度 > 宽度），且处于顶部中央区域时，强制向下推
+    if (containerBounds.size.height > containerBounds.size.width && containerBounds.size.height > 800) {
+        if (targetCenter.y - halfH < 54.0) { // 高度处于灵动岛范围内
+            // 宽度处于灵动岛中间部分（左右 75pt）
+            if (targetCenter.x + halfW > containerBounds.size.width / 2.0 - 75.0 &&
+                targetCenter.x - halfW < containerBounds.size.width / 2.0 + 75.0) {
+                targetCenter.y = 54.0 + halfH + 4.0; // 强行把浮窗推到灵动岛下方
+            }
+        }
+    }
+
     void (^layoutBlock)(void) = ^{ floatingView.center = targetCenter; };
 
     if (animate) {
@@ -772,11 +717,35 @@ static void updateFloatingSize(void) {
     }
 
     CGFloat rotationAngle = 0.0;
+    BOOL isLandscape = NO;
     switch (orientation) {
-        case UIInterfaceOrientationLandscapeLeft: rotationAngle = -M_PI_2; break;
-        case UIInterfaceOrientationLandscapeRight: rotationAngle = M_PI_2; break;
-        case UIInterfaceOrientationPortraitUpsideDown: rotationAngle = M_PI; break;
-        case UIInterfaceOrientationPortrait: default: rotationAngle = 0.0; break;
+        case UIInterfaceOrientationLandscapeLeft: 
+            rotationAngle = -M_PI_2; 
+            isLandscape = YES;
+            break;
+        case UIInterfaceOrientationLandscapeRight: 
+            rotationAngle = M_PI_2; 
+            isLandscape = YES;
+            break;
+        case UIInterfaceOrientationPortraitUpsideDown: 
+            rotationAngle = M_PI; 
+            break;
+        case UIInterfaceOrientationPortrait: 
+        default: 
+            rotationAngle = 0.0; 
+            break;
+    }
+
+    // 👑 [横屏自动展开] 判断
+    if (autoExpandLandscape) {
+        if (isLandscape) {
+            if (floatingView.isCollapsed) {
+                [floatingView expandFromEdgeAnimated:YES];
+            }
+        } else {
+            // 回到竖屏后，恢复倒计时逻辑
+            [floatingView resetInactivityTimer];
+        }
     }
 
     CGAffineTransform finalTransform = CGAffineTransformConcat(CGAffineTransformMakeScale(floatingScale, floatingScale), CGAffineTransformMakeRotation(rotationAngle));
@@ -887,7 +856,6 @@ static void updateCPU(void) {
     if (!isEnabled) return;
 
     double cpu = getSystemCPUUsage();
-    // 🟢 把算出来的 CPU 负载百分比传给频率函数，获得真实的动态频率！
     double cpuFreq = getRealCPUFrequency(cpu);
     double fps = [SBCPUFPSHelper sharedInstance].currentFPS;
 
@@ -1312,6 +1280,12 @@ static void applySystemRefreshRate(void) {
 
 - (void)inactivityTimerFired {
     if (!settingsShowing && !detailShowing && !_isCollapsed) {
+        // 👑 [横屏自动展开] 判断当前屏幕状态，如果是横屏且开启了开关，阻止折叠
+        UIInterfaceOrientation orientation = getActiveInterfaceOrientation();
+        BOOL isLandscape = (orientation == UIInterfaceOrientationLandscapeLeft || orientation == UIInterfaceOrientationLandscapeRight);
+        if (autoExpandLandscape && isLandscape) {
+            return;
+        }
         [self collapseToEdgeAnimated:YES];
     }
 }
@@ -1502,6 +1476,7 @@ static void applySystemRefreshRate(void) {
     }
 }
 
+// 👑 [新增控制] 只有通过点击（Tap），才会触发展开操作
 - (void)handleSingleTap:(UITapGestureRecognizer *)tap {
     if (tap.state == UIGestureRecognizerStateEnded) {
         if (_isCollapsed) [self expandFromEdgeAnimated:YES];
@@ -1509,6 +1484,7 @@ static void applySystemRefreshRate(void) {
     }
 }
 
+// 👑 [体验优化] 拖动时不会触发展开，保持原来小巧的折叠形态
 - (void)handlePan:(UIPanGestureRecognizer *)pan {
     [self resetInactivityTimer];
 
@@ -1543,6 +1519,7 @@ static void applySystemRefreshRate(void) {
             [[NSUserDefaults standardUserDefaults] setObject:NSStringFromCGRect(self.frame) forKey:@"SBCPU.LastFrame"];
             [[NSUserDefaults standardUserDefaults] synchronize];
         }
+        // 拖动完毕后自动贴边
         clampAndPositionFloatingView(self.center, YES);
         [self resetInactivityTimer];
     }
@@ -2187,7 +2164,7 @@ static void applySystemRefreshRate(void) {
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     (void)tableView;
-    if (section == 0) return 3;
+    if (section == 0) return 4; // 🟢 新增一行横屏展开开关
     if (section == 1) return 3;
     if (section == 2) return 4;
     if (section == 3) return 3;
@@ -2243,6 +2220,13 @@ static void applySystemRefreshRate(void) {
             NSArray *modes = @[@"CPU 使用率", @"FPS 帧率", @"电池温度", @"电池电流"];
             cell.detailTextLabel.text = (collapsedDisplayMode >= 0 && collapsedDisplayMode < modes.count) ? modes[collapsedDisplayMode] : modes[0];
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        } else if (indexPath.row == 3) {
+            // 👑 [新增功能] 横屏游戏自动展开
+            cell.textLabel.text = @"横屏游戏自动展开";
+            UISwitch *sw = [UISwitch new];
+            sw.on = autoExpandLandscape;
+            [sw addTarget:self action:@selector(changeAutoExpandLandscape:) forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = sw;
         }
     } else if (indexPath.section == 1) {
         if (indexPath.row == 0) {
@@ -2543,6 +2527,12 @@ static void applySystemRefreshRate(void) {
             [floatingView resetInactivityTimer];
         }
     }
+}
+
+- (void)changeAutoExpandLandscape:(UISwitch *)sw {
+    autoExpandLandscape = sw.isOn;
+    SavePreferencesAndNotify();
+    if (floatingView) updateFloatingSize(); // 立即生效
 }
 
 - (void)changeLogout:(UISwitch *)sw { autoLogoutEnable = sw.isOn; SavePreferencesAndNotify(); }
