@@ -44,6 +44,11 @@
 - (float)idealRefreshRate;
 @end
 
+// 补充底层参数声明，彻底解决传字典导致的 6 秒 XPC 超时卡顿
+@interface FBSOpenApplicationOptions : NSObject
++ (id)optionsWithDictionary:(NSDictionary *)dictionary;
+@end
+
 @interface FBSOpenApplicationService : NSObject
 + (id)sharedInstance;
 - (void)openApplication:(id)arg1 withOptions:(id)arg2 completion:(id)arg3;
@@ -117,7 +122,10 @@ typedef struct {
 @property (nonatomic, strong) UILabel *batteryValueLabel;
 @property (nonatomic, strong) UILabel *batterySubLabel;
 @property (nonatomic, strong) UIView *div2;
-@property (nonatomic, strong) UILabel *tempIconLabel;
+
+// 把温度图标从普通的 Label 换成了 ImageView
+@property (nonatomic, strong) UIImageView *tempIconView;
+
 @property (nonatomic, strong) UILabel *tempValueLabel;
 @property (nonatomic, strong) UILabel *tempSubLabel;
 @property (nonatomic, strong) UIView *div3;
@@ -806,7 +814,6 @@ static void clampAndPositionFloatingView(CGPoint targetCenter, BOOL animate) {
         CGFloat colMinX = targetHalfW + 4.0f;
         CGFloat colMaxX = containerBounds.size.width - targetHalfW - 4.0f;
         
-        // 【打脸补丁】补充了漏掉的纵向边界变量定义
         CGFloat colMinY = targetHalfH + 20.0f;
         CGFloat colMaxY = containerBounds.size.height - targetHalfH - 10.0f;
 
@@ -1340,13 +1347,15 @@ static void applySystemRefreshRate(void) {
         _div2.backgroundColor = [UIColor colorWithWhite:0.0f alpha:0.1f];
         [_performanceContainer addSubview:_div2];
 
-        // 🟢 恢复原汁原味的温度计 Label
-        _tempIconLabel = [[UILabel alloc] init];
-        _tempIconLabel.text = @"🌡";
-        _tempIconLabel.font = [UIFont systemFontOfSize:17];
-        _tempIconLabel.transform = CGAffineTransformMakeRotation(-0.35); 
-        _tempIconLabel.textAlignment = NSTextAlignmentCenter;
-        [_performanceContainer addSubview:_tempIconLabel];
+        // 🟢 换用一模一样的 SF Symbol 系统内置高分辨率红温度计
+        _tempIconView = [[UIImageView alloc] init];
+        _tempIconView.contentMode = UIViewContentModeScaleAspectFit;
+        if (@available(iOS 13.0, *)) {
+            UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:16 weight:UIImageSymbolWeightBold];
+            _tempIconView.image = [UIImage systemImageNamed:@"thermometer" withConfiguration:config];
+            _tempIconView.tintColor = [UIColor systemRedColor];
+        }
+        [_performanceContainer addSubview:_tempIconView];
 
         _tempValueLabel = [[UILabel alloc] init];
         _tempValueLabel.textColor = [UIColor blackColor];
@@ -1466,7 +1475,7 @@ static void applySystemRefreshRate(void) {
     }
 }
 
-// 🚀 [修复 BUG 1] 点击直达聊天！提取最深处的 Payload 并用双路由强开
+// 🚀 [终极修复] 0秒丝滑唤醒 App，使用严格标准的 Options 对象拒绝 XPC 超时死锁
 - (void)handleSingleTap:(UITapGestureRecognizer *)tap {
     if (tap.state == UIGestureRecognizerStateEnded) {
         if (_isShowingNotification && _currentNotification) {
@@ -1475,7 +1484,6 @@ static void applySystemRefreshRate(void) {
             [self hideNotification]; // 先极速收起通知
             
             dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-                // 方案 1：尝试从最深层榨取原始的 userInfo 字典，这个带有跳跃具体聊天的关键参数！
                 id userInfo = nil;
                 @try {
                     id userNotif = [req respondsToSelector:@selector(userNotification)] ? [req valueForKey:@"userNotification"] : nil;
@@ -1488,23 +1496,30 @@ static void applySystemRefreshRate(void) {
 
                 dispatch_async(dispatch_get_main_queue(), ^{
                     BOOL opened = NO;
-                    // 使用带 Payload 的底层服务拉起，模拟真实点击横幅的系统行为
-                    if (userInfo) {
-                        NSMutableDictionary *opts = [NSMutableDictionary dictionary];
-                        opts[@"__Payload"] = userInfo;
-                        opts[@"__UserInfo"] = userInfo;
-                        opts[@"bks-open-application-options-notification-payload"] = userInfo;
-                        Class fbsClass = NSClassFromString(@"FBSOpenApplicationService");
-                        if (fbsClass && [fbsClass respondsToSelector:@selector(sharedInstance)]) {
-                            FBSOpenApplicationService *fbsService = (FBSOpenApplicationService *)[fbsClass sharedInstance];
-                            if ([fbsService respondsToSelector:@selector(openApplication:withOptions:completion:)]) {
-                                [fbsService openApplication:bundleID withOptions:opts completion:nil];
-                                opened = YES;
+                    
+                    Class fbsClass = NSClassFromString(@"FBSOpenApplicationService");
+                    Class optsClass = NSClassFromString(@"FBSOpenApplicationOptions");
+                    
+                    if (fbsClass && optsClass) {
+                        FBSOpenApplicationService *fbsService = (FBSOpenApplicationService *)[fbsClass sharedInstance];
+                        if ([fbsService respondsToSelector:@selector(openApplication:withOptions:completion:)]) {
+                            
+                            // 构造标准合规的入参字典
+                            NSMutableDictionary *dict = [NSMutableDictionary dictionary];
+                            dict[@"__UnlockPrompt"] = @YES; // 解锁安全跳转
+                            if (userInfo) {
+                                dict[@"__Payload"] = userInfo;
+                                dict[@"__UserInfo"] = userInfo;
+                                dict[@"bks-open-application-options-notification-payload"] = userInfo;
                             }
+                            // 核心修复：转化为符合底层要求的标准 Options 对象
+                            id fbsOptions = [optsClass optionsWithDictionary:dict];
+                            
+                            [fbsService openApplication:bundleID withOptions:fbsOptions completion:nil];
+                            opened = YES;
                         }
                     }
                     
-                    // 方案 2：如果提取不到或者沙盒拦截，使用底层 Workspace 强开目标 App
                     if (!opened) {
                         Class lsawClass = NSClassFromString(@"LSApplicationWorkspace");
                         if (lsawClass && [lsawClass respondsToSelector:@selector(defaultWorkspace)]) {
@@ -1648,7 +1663,7 @@ static void applySystemRefreshRate(void) {
     _batteryValueLabel.hidden = !showBattery;
     _batterySubLabel.hidden = !showBattery;
 
-    _tempIconLabel.hidden = !showTemp;
+    _tempIconView.hidden = !showTemp;
     _tempValueLabel.hidden = !showTemp;
     _tempSubLabel.hidden = !showTemp;
 
@@ -1715,7 +1730,7 @@ static void applySystemRefreshRate(void) {
 
     if (showTemp) {
         CGFloat tempW = 60.0f;
-        _tempIconLabel.frame = CGRectMake(currentX, padY + 11, 20, 20);
+        _tempIconView.frame = CGRectMake(currentX, padY + 10, 20, 20); // 居中适配SF Symbol
         _tempValueLabel.frame = CGRectMake(currentX + 24, padY + 10, tempW - 24, 16);
         _tempSubLabel.frame = CGRectMake(currentX + 24, padY + 27, tempW - 24, 12);
         currentX += tempW + 6.0f;
@@ -1909,7 +1924,7 @@ static void applySystemRefreshRate(void) {
     self.batteryValueLabel.hidden = !showBatteryPercent;
     self.batterySubLabel.hidden = !showBatteryPercent;
     
-    self.tempIconLabel.hidden = !showBatteryTemperature;
+    self.tempIconView.hidden = !showBatteryTemperature;
     self.tempValueLabel.hidden = !showBatteryTemperature;
     self.tempSubLabel.hidden = !showBatteryTemperature;
 
