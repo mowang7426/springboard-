@@ -93,7 +93,6 @@ typedef struct {
 @implementation SBNotifReq
 @end
 
-
 @interface SBCPUFloatingView : UIView <UIGestureRecognizerDelegate>
 @property (nonatomic, assign) CGPoint lastPoint;
 @property (nonatomic, strong) UIVisualEffectView *blurView;
@@ -111,7 +110,7 @@ typedef struct {
 @property (nonatomic, strong) UILabel *batterySubLabel;
 @property (nonatomic, strong) UIView *div2;
 
-// 🟢 替换为 UIImageView 以支持精美 SF Symbols 图标
+// 🟢 精美 SF Symbols 图标
 @property (nonatomic, strong) UIImageView *tempIconView;
 @property (nonatomic, strong) UILabel *tempValueLabel;
 @property (nonatomic, strong) UILabel *tempSubLabel;
@@ -127,7 +126,7 @@ typedef struct {
 @property (nonatomic, strong) UIView *statusDot;
 @property (nonatomic, strong) UILabel *miniCpuLabel;
 
-// === 通知管理 UI ===
+// 通知管理 UI
 @property (nonatomic, strong) UILabel *badgeLabel;
 @property (nonatomic, strong) UIView *notifSeparator;
 @property (nonatomic, strong) UILabel *notifAppNameLabel;
@@ -150,7 +149,6 @@ typedef struct {
 - (void)updateLayoutWithShowCpuFreq:(BOOL)showFreq showFps:(BOOL)showFps showBatteryPercent:(BOOL)showBattery showBatteryTemp:(BOOL)showTemp showBatteryCurrent:(BOOL)showCurrent isCharging:(BOOL)isCharging;
 - (void)updateDataWithCPU:(double)cpu cpuFreq:(double)cpuFreq fps:(double)fps battery:(NSInteger)battery temp:(double)temp current:(double)current isCharging:(BOOL)isCharging;
 
-// 通知交互
 - (void)showNotification:(SBNotifReq *)req;
 - (void)hideNotification;
 @end
@@ -249,7 +247,6 @@ static uint64_t speedUpBytesPerSec = 0;
 static uint64_t speedDownBytesPerSec = 0;
 static CFAbsoluteTime lastNetSpeedTime = 0;
 
-// === 通知管理状态 ===
 static BOOL notificationEnable = YES;
 static BOOL wechatEnable = YES;
 static BOOL qqEnable = YES;
@@ -259,7 +256,55 @@ static NSInteger notificationDuration = 5;
 static NSMutableArray<SBNotifReq *> *historyNotifications = nil;
 
 
-#pragma mark - 4. Notification Manager (通知防漏 + 防抖处理)
+#pragma mark - 4. 🚀 核心：底层 C 函数前置声明 (修复编译报错)
+
+static DeviceSpec getDeviceSpec(void);
+static UIWindowScene *getWindowScene(void);
+static UIInterfaceOrientation getActiveInterfaceOrientation(void);
+static void clampAndPositionFloatingView(CGPoint targetCenter, BOOL animate);
+static void applyVisibility(void);
+static void applyFloatingAlpha(void);
+static void updateFloatingSize(void);
+static void createCPUWindow(void);
+static void openDetailView(void);
+static void openSettings(void);
+static void checkHighCPU(double cpu);
+static void updateCPU(void);
+
+static BOOL getBoolPref(CFStringRef key, BOOL defaultVal);
+static float getFloatPref(CFStringRef key, float defaultVal);
+static NSInteger getIntPref(CFStringRef key, NSInteger defaultVal);
+static void setBoolPref(CFStringRef key, BOOL value);
+static void setFloatPref(CFStringRef key, float value);
+static void setIntPref(CFStringRef key, NSInteger value);
+static void LoadPreferences(void);
+static void SavePreferencesAndNotify(void);
+
+static BOOL isDeviceOverheated(void);
+static void applySystemRefreshRate(void);
+static NSDictionary *getRealBatteryDetails(void);
+static double getBatteryTemperatureInternal(void);
+static double getBatteryCurrentInternal(void);
+static BOOL isChargingInternal(void);
+
+static double getSpringBoardCPUUsage(void);
+static double getTotalCPUUsage(void); 
+static double getRealCPUFrequency(double currentCpuUsage);
+static void setHardwareChargingInhibit(BOOL inhibit);
+static NSString *getNetworkType(void);
+
+static inline void SendCPUModeToDaemon(NSInteger mode, BOOL blockDimming, BOOL forceFastCharge) {
+    int token;
+    if (notify_register_check(NOTIFY_CPU_MODE, &token) == NOTIFY_STATUS_OK) {
+        uint64_t state = (mode & 0xFF) | ((blockDimming ? 1ULL : 0) << 8) | ((forceFastCharge ? 1ULL : 0) << 9);
+        notify_set_state(token, state);
+        notify_post(NOTIFY_CPU_MODE);
+        notify_cancel(token);
+    }
+}
+
+
+#pragma mark - 5. Notification Manager (通知防漏 + 防抖处理)
 
 @interface SBNotificationManager : NSObject
 + (instancetype)sharedInstance;
@@ -342,7 +387,7 @@ static NSMutableArray<SBNotifReq *> *historyNotifications = nil;
 @end
 
 
-#pragma mark - 5. 底层 C 函数具体实现
+#pragma mark - 6. 底层 C 函数具体实现
 
 static DeviceSpec getDeviceSpec(void) {
     char machine[256] = {0};
@@ -975,7 +1020,6 @@ static void updateCPU(void) {
             floatingView.statusLabel.textColor = [UIColor systemOrangeColor];
             floatingView.statusDot.backgroundColor = [UIColor systemOrangeColor];
         } else if (forceFastChargeEnable && charging) {
-            // 🟢 修改此处文字内含的Emoji 变身为闪电
             floatingView.statusLabel.text = @"⚡ 满血快充无视限制中";
             floatingView.statusLabel.textColor = [UIColor systemRedColor];
         }
@@ -1008,7 +1052,7 @@ static void applySystemRefreshRate(void) {
 }
 
 
-#pragma mark - 6. 所有的 Objective-C 类实现区块
+#pragma mark - 7. 所有的 Objective-C 类实现区块
 
 @implementation SBCPUFPSHelper {
     CADisplayLink *_displayLink;
@@ -1216,11 +1260,10 @@ static void applySystemRefreshRate(void) {
         _div2.backgroundColor = [UIColor colorWithWhite:0.0f alpha:0.1f];
         [content addSubview:_div2];
 
-        // 🟢 换成红色 SF Symbol 的精致温度计
+        // 🟢 精美 SF Symbols 图标：温度计
         _tempIconView = [[UIImageView alloc] init];
         if (@available(iOS 13.0, *)) {
-            UIImage *img = [[UIImage systemImageNamed:@"thermometer.medium"] imageWithConfiguration:[UIImageSymbolConfiguration configurationWithWeight:UIImageSymbolWeightSemibold]];
-            if (!img) img = [UIImage systemImageNamed:@"thermometer"];
+            UIImage *img = [[UIImage systemImageNamed:@"thermometer"] imageWithConfiguration:[UIImageSymbolConfiguration configurationWithWeight:UIImageSymbolWeightSemibold]];
             _tempIconView.image = img;
         }
         _tempIconView.tintColor = [UIColor colorWithRed:0.95 green:0.3 blue:0.3 alpha:1.0];
@@ -1244,7 +1287,7 @@ static void applySystemRefreshRate(void) {
         _div3.backgroundColor = [UIColor colorWithWhite:0.0f alpha:0.1f];
         [content addSubview:_div3];
 
-        // 🟢 换成黄色 SF Symbol 的精致闪电
+        // 🟢 精美 SF Symbols 图标：闪电
         _currentIconView = [[UIImageView alloc] init];
         if (@available(iOS 13.0, *)) {
             UIImage *img = [[UIImage systemImageNamed:@"bolt.fill"] imageWithConfiguration:[UIImageSymbolConfiguration configurationWithWeight:UIImageSymbolWeightSemibold]];
@@ -1694,7 +1737,7 @@ static void applySystemRefreshRate(void) {
         } else _div2.hidden = YES;
     } else _div2.hidden = YES;
 
-    // 🟢 精准适配 SF Symbols 图标的位置
+    // 🟢 SF Symbols 的精准位移对齐
     if (showTemp) {
         CGFloat tempW = 60.0f;
         _tempIconView.frame = CGRectMake(currentX, padY + 11, 16, 20);
@@ -1864,7 +1907,7 @@ static void applySystemRefreshRate(void) {
     }
     
     [UIView animateWithDuration:0.45 delay:0 usingSpringWithDamping:0.75 initialSpringVelocity:0.5 options:UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionBeginFromCurrentState animations:^{
-        updateFloatingSize();
+        [self updateFloatingSize];
     } completion:nil];
 }
 
@@ -1879,7 +1922,7 @@ static void applySystemRefreshRate(void) {
     _currentNotification = nil;
     
     [UIView animateWithDuration:0.45 delay:0 usingSpringWithDamping:0.75 initialSpringVelocity:0.5 options:UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionBeginFromCurrentState animations:^{
-        updateFloatingSize();
+        [self updateFloatingSize];
     } completion:^(BOOL finished) {
         [self resetInactivityTimer];
     }];
@@ -2224,7 +2267,7 @@ static void applySystemRefreshRate(void) {
     if (section == 0) return 4; 
     if (section == 1) return 3;
     if (section == 2) return 5;
-    if (section == 3) return 6; // 通知管理
+    if (section == 3) return 6; 
     if (section == 4) return 3;
     if (section == 5) return 2;
     if (section == 6) return 5;
@@ -2236,7 +2279,7 @@ static void applySystemRefreshRate(void) {
     if (section == 0) return @"📱 智能缩进与侧边吸附";
     if (section == 1) return @"⚡ 自动控制与防护";
     if (section == 2) return @"🔲 悬浮窗外观";
-    if (section == 3) return @"💬 消息与通知管理"; // V2.8 通知管理
+    if (section == 3) return @"💬 消息与通知管理"; 
     if (section == 4) return @"🧠 智能选项";
     if (section == 5) return @"🎮 性能与高刷锁定";
     if (section == 6) return @"🌡️ Insulation (温控核心)"; 
@@ -2464,7 +2507,116 @@ static void applySystemRefreshRate(void) {
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
-    // 省略展开配置项防止文件过长（保留已有逻辑不变）
+    if (indexPath.section == 0) {
+        if (indexPath.row == 1) {
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"无操作收起延迟" message:@"选择多长时间无操作后自动折叠" preferredStyle:UIAlertControllerStyleActionSheet];
+            NSArray *titles = @[@"2 秒", @"3 秒", @"4 秒", @"5 秒", @"8 秒", @"10 秒"];
+            NSArray *values = @[@2, @3, @4, @5, @8, @10];
+            for (NSInteger i = 0; i < titles.count; i++) {
+                [alert addAction:[UIAlertAction actionWithTitle:titles[i] style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+                    autoCollapseDelay = [values[i] integerValue];
+                    SavePreferencesAndNotify();
+                    [self.tableView reloadData];
+                }]];
+            }
+            [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+            [self presentViewController:alert animated:YES completion:nil];
+        } else if (indexPath.row == 2) {
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"折叠显示内容" message:@"选择悬浮窗隐藏后显示的信息" preferredStyle:UIAlertControllerStyleActionSheet];
+            NSArray *titles = @[@"CPU 使用率", @"FPS 帧率", @"电池温度", @"电池电流"];
+            for (NSInteger i = 0; i < titles.count; i++) {
+                [alert addAction:[UIAlertAction actionWithTitle:titles[i] style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+                    collapsedDisplayMode = i;
+                    SavePreferencesAndNotify();
+                    [self.tableView reloadData];
+                }]];
+            }
+            [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+            [self presentViewController:alert animated:YES completion:nil];
+        }
+    } else if (indexPath.section == 1) {
+        if (indexPath.row == 1) {
+            SBCPUValuePickerController *vc = [[SBCPUValuePickerController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+            [self.navigationController pushViewController:vc animated:YES];
+        } else if (indexPath.row == 2) {
+            SBCPUTimePickerController *vc = [[SBCPUTimePickerController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+            [self.navigationController pushViewController:vc animated:YES];
+        }
+    } else if (indexPath.section == 2) {
+        if (indexPath.row == 1) {
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"透明度" message:@"选择悬浮窗透明度" preferredStyle:UIAlertControllerStyleActionSheet];
+            NSArray *titles = @[@"20%", @"40%", @"60%", @"70%", @"85%", @"100%"];
+            NSArray *values = @[@0.2, @0.4, @0.6, @0.7, @0.85, @1.0];
+            for (NSInteger i = 0; i < titles.count; i++) {
+                [alert addAction:[UIAlertAction actionWithTitle:titles[i] style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+                    floatingAlpha = [values[i] floatValue];
+                    SavePreferencesAndNotify();
+                    applyFloatingAlpha();
+                    [self.tableView reloadData];
+                }]];
+            }
+            [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+            [self presentViewController:alert animated:YES completion:nil];
+        }
+    } else if (indexPath.section == 3) {
+        if (indexPath.row == 5) {
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"通知显示时间" message:@"选择消息浮窗保留多长时间" preferredStyle:UIAlertControllerStyleActionSheet];
+            NSArray *titles = @[@"3 秒", @"5 秒", @"8 秒", @"10 秒"];
+            NSArray *values = @[@3, @5, @8, @10];
+            for (NSInteger i = 0; i < titles.count; i++) {
+                [alert addAction:[UIAlertAction actionWithTitle:titles[i] style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+                    notificationDuration = [values[i] integerValue];
+                    SavePreferencesAndNotify();
+                    [self.tableView reloadData];
+                }]];
+            }
+            [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+            [self presentViewController:alert animated:YES completion:nil];
+        }
+    } else if (indexPath.section == 4) {
+        if (indexPath.row == 2) {
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"吸附模式" message:@"选择悬浮窗贴边时的吸附位置" preferredStyle:UIAlertControllerStyleActionSheet];
+            NSArray *modes = @[@"自动", @"左侧", @"右侧", @"顶部", @"底部"];
+            for (NSInteger i = 0; i < modes.count; i++) {
+                [alert addAction:[UIAlertAction actionWithTitle:modes[i] style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+                    dockMode = i;
+                    SavePreferencesAndNotify();
+                    [self.tableView reloadData];
+                }]];
+            }
+            [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+            [self presentViewController:alert animated:YES completion:nil];
+        }
+    } else if (indexPath.section == 6) {
+        if (indexPath.row == 0) {
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"CPU 模式" message:@"选择系统级温控干预级别" preferredStyle:UIAlertControllerStyleActionSheet];
+            NSArray *titles = @[@"苹果原生温控", @"模拟低电频率", @"防止温控降频"];
+            for (NSInteger i = 0; i < titles.count; i++) {
+                [alert addAction:[UIAlertAction actionWithTitle:titles[i] style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+                    insulationCpuMode = i;
+                    SavePreferencesAndNotify();
+                    [self.tableView reloadData];
+                }]];
+            }
+            [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+            [self presentViewController:alert animated:YES completion:nil];
+        }
+    } else if (indexPath.section == 7) {
+        if (indexPath.row == 1) {
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"断充温度阈值" message:@"选择电池达到多少度时强制旁路供电" preferredStyle:UIAlertControllerStyleActionSheet];
+            NSArray *titles = @[@"35.0°C", @"36.0°C", @"37.0°C", @"38.0°C", @"39.0°C", @"40.0°C", @"41.0°C", @"42.0°C", @"43.0°C"];
+            NSArray *values = @[@35.0, @36.0, @37.0, @38.0, @39.0, @40.0, @41.0, @42.0, @43.0];
+            for (NSInteger i = 0; i < titles.count; i++) {
+                [alert addAction:[UIAlertAction actionWithTitle:titles[i] style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+                    smartChargeLimitTemp = [values[i] floatValue];
+                    SavePreferencesAndNotify();
+                    [self.tableView reloadData];
+                }]];
+            }
+            [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+            [self presentViewController:alert animated:YES completion:nil];
+        }
+    }
 }
 
 - (void)saveConfigs { SavePreferencesAndNotify(); }
