@@ -46,7 +46,7 @@ static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry
 
     NSInteger mode = getRealTimeMitigationMode();
     BOOL blockDimming = getRealTimeBlockDimming();
-    BOOL forceFastCharge = getRealTimeForceFastCharge(); // 🟢
+    BOOL forceFastCharge = getRealTimeForceFastCharge(); // 读取我们在面板里设置的快充开关
     NSString *propStr = (__bridge NSString *)propertyName;
     
     // 👑 彻底治愈“温控暗屏锁不住”！强行扔掉所有底层显示驱动的降亮指令
@@ -67,7 +67,7 @@ static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry
             [propStr isEqualToString:@"ChargeCurrentLimit"] ||
             [propStr isEqualToString:@"ChargeLimit"] ||
             [propStr isEqualToString:@"ChargeRate"]) {
-            // 直接将 thermalmonitord (温控中心) 发给电池限制电流的指令扔掉
+            // 直接将 thermalmonitord (系统温控中心) 发给电池限制电流的指令扔进垃圾桶
             // 系统以为限流了，实际上电池硬件将一直按照原装线材的最大协议物理跑满
             return KERN_SUCCESS;
         }
