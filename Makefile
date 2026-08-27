@@ -6,13 +6,11 @@ include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = SBCPUFloating SBCPUMitigation
 
-# 1. 桌面 UI 与悬浮窗进程
 SBCPUFloating_FILES = Tweak.xm
 SBCPUFloating_CFLAGS = -fobjc-arc
 SBCPUFloating_FRAMEWORKS = UIKit Foundation QuartzCore CoreMotion
 SBCPUFloating_PRIVATE_FRAMEWORKS = PowerUI IOKit
 
-# 2. 底层温控守护进程 (⚠️这里增加了 IOKit，用来穿透内核强写)
 SBCPUMitigation_FILES = MitigationHook.xm
 SBCPUMitigation_CFLAGS = -fobjc-arc
 SBCPUMitigation_FRAMEWORKS = Foundation
