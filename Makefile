@@ -4,13 +4,20 @@ TARGET = iphone:clang:16.5:14.0
 
 include $(THEOS)/makefiles/common.mk
 
-TWEAK_NAME = SBCPUFloating
+TWEAK_NAME = SBCPUFloating SBCPUMitigation
 
+# --- SpringBoard 悬浮窗与 UI 部分 ---
 SBCPUFloating_FILES = Tweak.xm
 SBCPUFloating_CFLAGS = -fobjc-arc
 SBCPUFloating_FRAMEWORKS = UIKit Foundation QuartzCore CoreMotion
 SBCPUFloating_PRIVATE_FRAMEWORKS = PowerUI IOKit
 
+# --- thermalmonitord 温控与降频核心部分 ---
+SBCPUMitigation_FILES = MitigationHook.xm
+SBCPUMitigation_CFLAGS = -fobjc-arc
+SBCPUMitigation_FRAMEWORKS = Foundation
+
 include $(THEOS_MAKE_PATH)/tweak.mk
 
 INSTALL_TARGET_PROCESSES = SpringBoard thermalmonitord
+
