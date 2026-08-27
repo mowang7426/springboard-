@@ -9,119 +9,71 @@ jobs:
     runs-on: macos-14
 
     steps:
-
-      # ==============================
-      # 获取源码
-      # ==============================
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ==============================
-      # 安装基础工具
-      # ==============================
       - name: Install dependencies
         run: |
           brew install make dpkg ldid xz
 
-      # ==============================
-      # 设置 THEOS
-      # ==============================
       - name: Set THEOS
         run: |
           echo "THEOS=$HOME/theos" >> $GITHUB_ENV
           echo "$HOME/theos/bin" >> $GITHUB_PATH
 
-      # ==============================
-      # 安装 RootHide Theos
-      # ==============================
       - name: Install RootHide Theos
         run: |
           rm -rf "$HOME/theos"
-          git clone --recursive \
-            https://github.com/roothide/theos.git \
-            "$HOME/theos"
-          echo "RootHide Theos installed."
-          ls -la "$HOME/theos"
+          git clone --recursive https://github.com/roothide/theos.git "$HOME/theos"
 
-      # ==============================
-      # 安装 iPhoneOS 16.5 SDK
-      # ==============================
       - name: Install iPhoneOS 16.5 SDK
         run: |
           set -e
-          echo "========================================"
-          echo " Download iPhoneOS 16.5 SDK"
-          echo "========================================"
           rm -rf /tmp/theos-sdks
           mkdir -p "$HOME/theos/sdks"
-          git clone \
-            --depth=1 \
-            --filter=blob:none \
-            --sparse \
-            https://github.com/theos/sdks.git \
-            /tmp/theos-sdks
+          git clone --depth=1 --filter=blob:none --sparse https://github.com/theos/sdks.git /tmp/theos-sdks
           cd /tmp/theos-sdks
           git sparse-checkout set iPhoneOS16.5.sdk
-          echo ""
-          echo "SDK repository downloaded."
-          if [ ! -d "iPhoneOS16.5.sdk" ]; then
-            echo ""
-            echo "ERROR: iPhoneOS16.5.sdk not found!"
-            exit 1
-          fi
-          echo ""
-          echo "Copying SDK to Theos..."
-          rm -rf "$HOME/theos/sdks/iPhoneOS16.5.sdk"
-          cp -R \
-            "iPhoneOS16.5.sdk" \
-            "$HOME/theos/sdks/"
+          cp -R "iPhoneOS16.5.sdk" "$HOME/theos/sdks/"
 
-      # ==============================
-      # 修复 control 文件格式 (解决 APT 报错核心)
-      # ==============================
-      - name: Fix control file formatting
+      # =======================================================
+      # 👑 终极杀招：直接在云端动态生成 control，无视任何本地格式错误
+      # =======================================================
+      - name: Generate Perfect Control File
         run: |
-          echo "Fixing CRLF line endings and appending EOF newline..."
-          tr -d '\r' < control > control_fixed
-          echo "" >> control_fixed
-          mv control_fixed control
-          cat control
+          rm -f control
+          cat << 'EOF' > control
+          Package: com.sbcpu.floating
+          Name: SB CPU Floating Notification
+          Version: 2.8
+          Architecture: iphoneos-arm64
+          Maintainer: MoWang
+          Author: MoWang
+          Description: SpringBoard CPU Monitor and Notification Manager
+          Section: Tweaks
+          Depends: mobilesubstrate
+          
+          EOF
+          echo "✅ Control file successfully generated!"
+          cat -e control
 
-      # ==============================
-      # 创建输出目录
-      # ==============================
       - name: Prepare build directory
         run: |
           rm -rf build
           mkdir -p build
 
-      # ==============================
-      # 编译 Rootless
-      # ==============================
       - name: Build Rootless
         run: |
           set -e
           make clean
-          THEOS_PACKAGE_SCHEME=rootless \
-            make package FINALPACKAGE=1
+          THEOS_PACKAGE_SCHEME=rootless make package FINALPACKAGE=1
 
-      # ==============================
-      # 保存 Rootless
-      # ==============================
       - name: Copy Rootless package
         run: |
           set -e
-          ROOTLESS_DEB=$(find packages \
-            -maxdepth 1 \
-            -type f \
-            -name "*.deb" \
-            | head -n 1)
-          cp "$ROOTLESS_DEB" \
-            "build/SBCPUFloating-V2.8-rootless.deb"
+          ROOTLESS_DEB=$(find packages -maxdepth 1 -type f -name "*.deb" | head -n 1)
+          cp "$ROOTLESS_DEB" "build/SBCPUFloating-V2.8-rootless.deb"
 
-      # ==============================
-      # 编译 RootHide
-      # ==============================
       - name: Clean before RootHide
         run: |
           make clean
@@ -130,23 +82,14 @@ jobs:
       - name: Build RootHide
         run: |
           set -e
-          THEOS_PACKAGE_SCHEME=roothide \
-            make package FINALPACKAGE=1
+          THEOS_PACKAGE_SCHEME=roothide make package FINALPACKAGE=1
 
       - name: Copy RootHide package
         run: |
           set -e
-          ROOTHIDE_DEB=$(find packages \
-            -maxdepth 1 \
-            -type f \
-            -name "*.deb" \
-            | head -n 1)
-          cp "$ROOTHIDE_DEB" \
-            "build/SBCPUFloating-V2.8-roothide.deb"
+          ROOTHIDE_DEB=$(find packages -maxdepth 1 -type f -name "*.deb" | head -n 1)
+          cp "$ROOTHIDE_DEB" "build/SBCPUFloating-V2.8-roothide.deb"
 
-      # ==============================
-      # 最终上传
-      # ==============================
       - name: Upload DEB packages
         uses: actions/upload-artifact@v4
         with:
