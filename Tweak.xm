@@ -380,25 +380,36 @@ static inline void SendCPUModeToDaemon(NSInteger mode, BOOL blockDimming, BOOL f
 
 #pragma mark - 6. 底层 C 函数具体实现
 
+// 💡 [绝杀修复]: 专门的构造函数，彻底绕过 Logos 预处理器对花括号的错误解析
+static DeviceSpec MakeDeviceSpec(const char *platform, const char *modelName, const char *chipName, NSInteger cores, double maxFreqMHz, NSInteger designBatteryCapacity) {
+    DeviceSpec spec;
+    spec.platform = platform;
+    spec.modelName = modelName;
+    spec.chipName = chipName;
+    spec.cores = cores;
+    spec.maxFreqMHz = maxFreqMHz;
+    spec.designBatteryCapacity = designBatteryCapacity;
+    return spec;
+}
+
 static DeviceSpec getDeviceSpec(void) {
     char machine[256] = {0};
     size_t size = sizeof(machine);
     sysctlbyname("hw.machine", machine, &size, NULL, 0);
     NSString *platform = [NSString stringWithUTF8String:machine];
 
-    // 最古老也是最稳妥的 C 风格结构体赋值法，兼容一切刁钻的编译器环境
-    if ([platform isEqualToString:@"iPhone16,2"]) { DeviceSpec s = {"iPhone16,2", "iPhone 15 Pro Max", "A17 Pro", 6, 3780.0, 4422}; return s; }
-    if ([platform isEqualToString:@"iPhone16,1"]) { DeviceSpec s = {"iPhone16,1", "iPhone 15 Pro", "A17 Pro", 6, 3780.0, 3274}; return s; }
-    if ([platform isEqualToString:@"iPhone15,5"]) { DeviceSpec s = {"iPhone15,5", "iPhone 15 Plus", "A16 Bionic", 6, 3468.0, 4383}; return s; }
-    if ([platform isEqualToString:@"iPhone15,4"]) { DeviceSpec s = {"iPhone15,4", "iPhone 15", "A16 Bionic", 6, 3349.0, 3349}; return s; }
-    if ([platform isEqualToString:@"iPhone15,3"]) { DeviceSpec s = {"iPhone15,3", "iPhone 14 Pro Max", "A16 Bionic", 6, 3468.0, 4323}; return s; }
-    if ([platform isEqualToString:@"iPhone15,2"]) { DeviceSpec s = {"iPhone15,2", "iPhone 14 Pro", "A16 Bionic", 6, 3468.0, 3200}; return s; }
-    if ([platform isEqualToString:@"iPhone17,1"]) { DeviceSpec s = {"iPhone17,1", "iPhone 16 Pro", "A18 Pro", 6, 4040.0, 3582}; return s; }
-    if ([platform isEqualToString:@"iPhone17,2"]) { DeviceSpec s = {"iPhone17,2", "iPhone 16 Pro Max", "A18 Pro", 6, 4040.0, 4685}; return s; }
+    // 全天下最安全的函数调用方式，完美适配老编译器和 Logos
+    if ([platform isEqualToString:@"iPhone16,2"]) return MakeDeviceSpec("iPhone16,2", "iPhone 15 Pro Max", "A17 Pro", 6, 3780.0, 4422);
+    if ([platform isEqualToString:@"iPhone16,1"]) return MakeDeviceSpec("iPhone16,1", "iPhone 15 Pro", "A17 Pro", 6, 3780.0, 3274);
+    if ([platform isEqualToString:@"iPhone15,5"]) return MakeDeviceSpec("iPhone15,5", "iPhone 15 Plus", "A16 Bionic", 6, 3468.0, 4383);
+    if ([platform isEqualToString:@"iPhone15,4"]) return MakeDeviceSpec("iPhone15,4", "iPhone 15", "A16 Bionic", 6, 3349.0, 3349);
+    if ([platform isEqualToString:@"iPhone15,3"]) return MakeDeviceSpec("iPhone15,3", "iPhone 14 Pro Max", "A16 Bionic", 6, 3468.0, 4323);
+    if ([platform isEqualToString:@"iPhone15,2"]) return MakeDeviceSpec("iPhone15,2", "iPhone 14 Pro", "A16 Bionic", 6, 3468.0, 3200);
+    if ([platform isEqualToString:@"iPhone17,1"]) return MakeDeviceSpec("iPhone17,1", "iPhone 16 Pro", "A18 Pro", 6, 4040.0, 3582);
+    if ([platform isEqualToString:@"iPhone17,2"]) return MakeDeviceSpec("iPhone17,2", "iPhone 16 Pro Max", "A18 Pro", 6, 4040.0, 4685);
 
     NSInteger activeCores = [NSProcessInfo processInfo].processorCount;
-    DeviceSpec defaultSpec = {machine, "iPhone", "Apple Silicon", activeCores, 3468.0, 4000};
-    return defaultSpec;
+    return MakeDeviceSpec(machine, "iPhone", "Apple Silicon", activeCores, 3468.0, 4000);
 }
 
 static BOOL getBoolPref(CFStringRef key, BOOL defaultVal) {
