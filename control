@@ -1,9 +1,9 @@
-Package: com.sbcpu.floating
+Package: com.yourname.sbcpufloating
 Name: SB CPU Floating
-Version: 2.0
+Version: 1.6.4
 Architecture: iphoneos-arm64
-Description: SpringBoard CPU and Battery Monitor tweak with real hardware thermal mitigation hooks and complete 4-direction docking.
-Maintainer: SBCPUFloating
-Author: SBCPUFloating
+Maintainer: YourName
+Author: YourName
+Description: SpringBoard CPU Floating Monitor and CPU Mitigation Controller
 Section: Tweaks
 Depends: mobilesubstrate
