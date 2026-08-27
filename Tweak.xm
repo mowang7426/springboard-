@@ -25,7 +25,6 @@
 #define kPrefChangedNotification CFSTR("com.yourname.sbcpufloating.prefschanged")
 #define kToggleNotification CFSTR("com.yourname.sbcpufloating.toggle")
 
-// 🟢 跨进程内核通信频道
 #define NOTIFY_CPU_MODE "com.yourname.sbcpufloating.cpumode"
 
 #pragma mark - 1. QuartzCore 私有类及数据结构声明
@@ -89,8 +88,7 @@ typedef struct {
 @property (nonatomic, strong) UILabel *batteryValueLabel;
 @property (nonatomic, strong) UILabel *batterySubLabel;
 @property (nonatomic, strong) UIView *div2;
-// 🟢 改为 UIImageView 以支持原生的正向温度计图标
-@property (nonatomic, strong) UIImageView *tempIconImageView; 
+@property (nonatomic, strong) UIImageView *tempIconImageView; // 🟢 正向温度计图标
 @property (nonatomic, strong) UILabel *tempValueLabel;
 @property (nonatomic, strong) UILabel *tempSubLabel;
 @property (nonatomic, strong) UIView *div3;
@@ -151,7 +149,6 @@ static SBCPUDetailViewController *detailVC = nil;
 static BOOL isEnabled = YES; 
 static CGFloat floatingScale = 1.0;
 static CGFloat floatingFontSize = 13.0;
-
 static CGFloat floatingCornerRadius = 16.0f; 
 
 static BOOL settingsShowing = NO;
@@ -172,7 +169,7 @@ static NSDate *cpuHighStartTime = nil;
 static BOOL logoutCounting = NO;
 
 static BOOL floatingAlphaEnable = YES;
-static CGFloat floatingAlpha = 0.85f; // 液态玻璃质感，稍微提升一点不透明度更好看
+static CGFloat floatingAlpha = 0.85f; 
 
 static BOOL keyboardAvoidEnable = YES;
 static BOOL smartDockEnable = YES;
@@ -192,7 +189,7 @@ static BOOL forceSunlightHBM = NO;
 
 static BOOL smartChargeLimitEnable = NO;
 static float smartChargeLimitTemp = 38.0f;
-static BOOL forceFastChargeEnable = NO; // 🟢 强力大招：无视发热满血快充
+static BOOL forceFastChargeEnable = NO; // 🟢 强力满血快充开关
 static BOOL isCurrentlyChargeInhibited = NO;      
 
 static BOOL showBatteryPercent = YES;
@@ -247,10 +244,11 @@ static double getRealCPUFrequency(double currentCpuUsage);
 static void setHardwareChargingInhibit(BOOL inhibit);
 static NSString *getNetworkType(void);
 
-// 👑 跨进程内核通信：加入 forceFastChargeEnable (第 9 位)
+// 👑 跨进程内核通信
 static void SendCPUModeToDaemon(NSInteger mode, BOOL blockDimming, BOOL forceFastCharge) {
     int token;
     if (notify_register_check(NOTIFY_CPU_MODE, &token) == NOTIFY_STATUS_OK) {
+        // Bit 8=防暗屏, Bit 9=强制满血快充
         uint64_t state = (mode & 0xFF) | ((blockDimming ? 1ULL : 0) << 8) | ((forceFastCharge ? 1ULL : 0) << 9);
         notify_set_state(token, state);
         notify_post(NOTIFY_CPU_MODE);
@@ -377,7 +375,7 @@ static void LoadPreferences(void) {
 
     smartChargeLimitEnable = getBoolPref(CFSTR("smartChargeLimitEnable"), NO);
     smartChargeLimitTemp = getFloatPref(CFSTR("smartChargeLimitTemp"), 38.0f);
-    forceFastChargeEnable = getBoolPref(CFSTR("forceFastChargeEnable"), NO); // 🟢 新增强制快充读取
+    forceFastChargeEnable = getBoolPref(CFSTR("forceFastChargeEnable"), NO); 
 
     NSString *processName = [NSProcessInfo processInfo].processName;
     if ([processName isEqualToString:@"SpringBoard"]) {
@@ -433,7 +431,7 @@ static void SavePreferencesAndNotify(void) {
 
     setBoolPref(CFSTR("smartChargeLimitEnable"), smartChargeLimitEnable);
     setFloatPref(CFSTR("smartChargeLimitTemp"), smartChargeLimitTemp);
-    setBoolPref(CFSTR("forceFastChargeEnable"), forceFastChargeEnable); // 🟢 强力满血快充开关保存
+    setBoolPref(CFSTR("forceFastChargeEnable"), forceFastChargeEnable); 
     
     CFPreferencesSynchronize(kPrefAppID, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
 
@@ -587,30 +585,6 @@ static double getSpringBoardCPUUsage(void) {
     
     kr = vm_deallocate(mach_task_self(), (vm_offset_t)thread_list, thread_count * sizeof(thread_t));
     return total_cpu;
-}
-
-static double getTotalCPUUsage(void) {
-    kern_return_t kr;
-    mach_msg_type_number_t count;
-    static host_cpu_load_info_data_t previous_info = {0, 0, 0, 0};
-    host_cpu_load_info_data_t info;
-    
-    count = HOST_CPU_LOAD_INFO_COUNT;
-    kr = host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO, (host_info_t)&info, &count);
-    if (kr != KERN_SUCCESS) return 0.0;
-    
-    natural_t user   = info.cpu_ticks[CPU_STATE_USER] - previous_info.cpu_ticks[CPU_STATE_USER];
-    natural_t system = info.cpu_ticks[CPU_STATE_SYSTEM] - previous_info.cpu_ticks[CPU_STATE_SYSTEM];
-    natural_t idle   = info.cpu_ticks[CPU_STATE_IDLE] - previous_info.cpu_ticks[CPU_STATE_IDLE];
-    natural_t nice   = info.cpu_ticks[CPU_STATE_NICE] - previous_info.cpu_ticks[CPU_STATE_NICE];
-    
-    previous_info = info;
-    
-    double totalTicks = user + system + idle + nice;
-    if (totalTicks <= 0.0) return 0.0;
-    
-    double cpuUsage = (user + system + nice) / totalTicks * 100.0;
-    return cpuUsage;
 }
 
 static double getRealCPUFrequency(double currentCpuUsage) {
@@ -1120,10 +1094,9 @@ static void applySystemRefreshRate(void) {
         _longPressGesture.delegate = self;
         [self addGestureRecognizer:_longPressGesture];
 
-        // 柔和优雅的阴影 
         self.layer.shadowColor = [UIColor blackColor].CGColor;
-        self.layer.shadowOpacity = 0.25f;
-        self.layer.shadowOffset = CGSizeMake(0, 5);
+        self.layer.shadowOpacity = 0.18f;
+        self.layer.shadowOffset = CGSizeMake(0, 4);
         self.layer.shadowRadius = 12.0f;
 
         // 🟢 完美恢复浅色液态玻璃风格
@@ -1132,9 +1105,9 @@ static void applySystemRefreshRate(void) {
         CGFloat cornerRad = floatingCornerRadius;
         _blurView.layer.cornerRadius = cornerRad;
         _blurView.layer.masksToBounds = YES;
-        // 加入极细微的白色反光勾边，增加质感
+        // 加入极细微的白色反光勾边，增加玻璃通透感
         _blurView.layer.borderWidth = 0.5f;
-        _blurView.layer.borderColor = [UIColor colorWithWhite:1.0f alpha:0.40f].CGColor;
+        _blurView.layer.borderColor = [UIColor colorWithWhite:1.0f alpha:0.60f].CGColor;
         _blurView.userInteractionEnabled = NO;
         [self addSubview:_blurView];
 
@@ -1224,8 +1197,8 @@ static void applySystemRefreshRate(void) {
         // 🟢 加入 Apple 原生高颜值正向温度计 (SF Symbols)
         UIImage *tempImage = [UIImage systemImageNamed:@"thermometer.medium"];
         _tempIconImageView = [[UIImageView alloc] initWithImage:tempImage];
-        // 给它一点渐变红的质感，不那么死板
-        _tempIconImageView.tintColor = [UIColor colorWithRed:1.0f green:0.3f blue:0.3f alpha:1.0f]; 
+        // 赋予漂亮的高级红
+        _tempIconImageView.tintColor = [UIColor systemRedColor]; 
         _tempIconImageView.contentMode = UIViewContentModeScaleAspectFit;
         [content addSubview:_tempIconImageView];
 
@@ -1607,7 +1580,7 @@ static void applySystemRefreshRate(void) {
 
     CABasicAnimation *glowAnim = [CABasicAnimation animationWithKeyPath:@"borderColor"];
     glowAnim.fromValue = (id)[UIColor colorWithRed:0.2f green:0.95f blue:0.5f alpha:1.0f].CGColor;
-    glowAnim.toValue = (id)[UIColor colorWithWhite:1.0f alpha:0.40f].CGColor;
+    glowAnim.toValue = (id)[UIColor colorWithWhite:1.0f alpha:0.60f].CGColor;
     glowAnim.duration = 0.7;
     [_blurView.layer addAnimation:glowAnim forKey:@"borderGlow"];
 }
@@ -1784,8 +1757,8 @@ static void applySystemRefreshRate(void) {
     
     if (!isCurrentlyChargeInhibited) {
         if (forceFastChargeEnable && isCharging) {
-            _statusLabel.text = @"⚡ 满血快充绕过限制中";
-            _statusLabel.textColor = [UIColor colorWithRed:1.0f green:0.2f blue:0.2f alpha:1.0f];
+            _statusLabel.text = @"⚡ 满血快充无视限制中";
+            _statusLabel.textColor = [UIColor systemRedColor];
         } else {
             _statusLabel.text = isCharging ? @"正在充电" : @"未在充电";
             _statusLabel.textColor = [UIColor colorWithRed:0.15f green:0.65f blue:0.3f alpha:1.0f];
@@ -1874,7 +1847,7 @@ static void applySystemRefreshRate(void) {
     [contentView addSubview:closeBtn];
 
     UIView *line = [[UIView alloc] initWithFrame:CGRectMake(0, 40, panelW, 0.5)];
-    line.backgroundColor = [UIColor colorWithWhite:0 alpha:0.1]; // 浅色分割线
+    line.backgroundColor = [UIColor colorWithWhite:0 alpha:0.1]; 
     [contentView addSubview:line];
 
     CGFloat colW = (panelW - 20) / 2.0;
@@ -1906,7 +1879,7 @@ static void applySystemRefreshRate(void) {
     }
 }
 
-// 🟢 修改为黑色主题展示
+// 🟢 修改为黑色文字主题
 - (UILabel *)createRowWithTitle:(NSString *)title x:(CGFloat)x y:(CGFloat)y width:(CGFloat)width parent:(UIView *)parent {
     UILabel *keyLbl = [[UILabel alloc] initWithFrame:CGRectMake(x, y, width * 0.46, 20)];
     keyLbl.text = [NSString stringWithFormat:@"%@:", title];
@@ -2250,7 +2223,6 @@ static void applySystemRefreshRate(void) {
     if (section == 3) return 3;
     if (section == 4) return 2;
     if (section == 5) return 5;
-    // 🟢 电池板块多加了一行（快充）
     if (section == 6) return 3; 
     return 6;
 }
@@ -2668,7 +2640,7 @@ static void applySystemRefreshRate(void) {
         isCurrentlyChargeInhibited = NO;
     }
 }
-// 🟢 满血快充切换通知内核
+// 🟢 满血快充切换
 - (void)changeForceFastCharge:(UISwitch *)sw { 
     forceFastChargeEnable = sw.isOn; 
     SavePreferencesAndNotify(); 
