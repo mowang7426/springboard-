@@ -1478,7 +1478,6 @@ static void applySystemRefreshRate(void) {
                 // 方案 1：尝试从最深层榨取原始的 userInfo 字典，这个带有跳跃具体聊天的关键参数！
                 id userInfo = nil;
                 @try {
-                    id defaultAction = [req respondsToSelector:@selector(defaultAction)] ? [req valueForKey:@"defaultAction"] : nil;
                     id userNotif = [req respondsToSelector:@selector(userNotification)] ? [req valueForKey:@"userNotification"] : nil;
                     userInfo = [userNotif respondsToSelector:@selector(userInfo)] ? [userNotif valueForKey:@"userInfo"] : nil;
                     if (!userInfo) {
@@ -1497,8 +1496,11 @@ static void applySystemRefreshRate(void) {
                         opts[@"bks-open-application-options-notification-payload"] = userInfo;
                         Class fbsClass = NSClassFromString(@"FBSOpenApplicationService");
                         if (fbsClass && [fbsClass respondsToSelector:@selector(sharedInstance)]) {
-                            [[fbsClass sharedInstance] performSelector:@selector(openApplication:withOptions:completion:) withObject:bundleID withObject:opts withObject:nil];
-                            opened = YES;
+                            FBSOpenApplicationService *fbsService = (FBSOpenApplicationService *)[fbsClass sharedInstance];
+                            if ([fbsService respondsToSelector:@selector(openApplication:withOptions:completion:)]) {
+                                [fbsService openApplication:bundleID withOptions:opts completion:nil];
+                                opened = YES;
+                            }
                         }
                     }
                     
@@ -2003,7 +2005,7 @@ static void applySystemRefreshRate(void) {
     
     // 强制触发变形为灵动胶囊
     [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionBeginFromCurrentState animations:^{
-        [self updateFloatingSize]; 
+        updateFloatingSize(); 
     } completion:nil];
 }
 
@@ -2023,7 +2025,7 @@ static void applySystemRefreshRate(void) {
     } else {
         [self resetInactivityTimer];
         [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionBeginFromCurrentState animations:^{
-            [self updateFloatingSize]; 
+            updateFloatingSize(); 
         } completion:^(BOOL finished) {
             [self resetInactivityTimer];
         }];
@@ -3013,3 +3015,4 @@ static void registerV160Observers(void) {
         });
     }
 }
+
