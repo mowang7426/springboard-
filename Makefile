@@ -6,11 +6,13 @@ include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = SBCPUFloating SBCPUMitigation
 
+# 1. 桌面 UI 与悬浮窗进程
 SBCPUFloating_FILES = Tweak.xm
 SBCPUFloating_CFLAGS = -fobjc-arc
 SBCPUFloating_FRAMEWORKS = UIKit Foundation QuartzCore CoreMotion
 SBCPUFloating_PRIVATE_FRAMEWORKS = PowerUI IOKit
 
+# 2. 🌟 底层温控+电源双守护进程 (引入 IOKit 强写)
 SBCPUMitigation_FILES = MitigationHook.xm
 SBCPUMitigation_CFLAGS = -fobjc-arc
 SBCPUMitigation_FRAMEWORKS = Foundation
@@ -18,4 +20,5 @@ SBCPUMitigation_PRIVATE_FRAMEWORKS = IOKit
 
 include $(THEOS_MAKE_PATH)/tweak.mk
 
-INSTALL_TARGET_PROCESSES = SpringBoard thermalmonitord
+# ⚠️ 这里加入了最重要的 powerd 电源总控守护进程！
+INSTALL_TARGET_PROCESSES = SpringBoard thermalmonitord powerd
