@@ -13,7 +13,6 @@ static int gNotifyToken = -1;
 typedef mach_port_t io_registry_entry_t;
 extern "C" kern_return_t IORegistryEntrySetCFProperty(io_registry_entry_t entry, CFStringRef propertyName, CFTypeRef property);
 
-// 同步强读 64 位加密内核通信指令
 static uint64_t getRealTimeState() {
     if (gNotifyToken == -1) {
         notify_register_check(NOTIFY_CPU_MODE, &gNotifyToken);
@@ -23,19 +22,12 @@ static uint64_t getRealTimeState() {
     return state;
 }
 
-static NSInteger getRealTimeMitigationMode() {
-    return getRealTimeState() & 0xFF;
-}
+static NSInteger getRealTimeMitigationMode() { return getRealTimeState() & 0xFF; }
+static BOOL getRealTimeBlockDimming() { return (getRealTimeState() >> 8) & 1; }
+static BOOL getRealTimeForceFastCharge() { return (getRealTimeState() >> 9) & 1; }
 
-static BOOL getRealTimeBlockDimming() {
-    return (getRealTimeState() >> 8) & 1;
-}
 
-static BOOL getRealTimeForceFastCharge() {
-    return (getRealTimeState() >> 9) & 1;
-}
-
-// 👑 [绝杀机制]：C语言底层 IOKit 硬件拦截
+// 👑 [绝杀机制]：C语言底层 IOKit 硬件拦截中心
 static kern_return_t (*orig_IORegistryEntrySetCFProperty)(io_registry_entry_t, CFStringRef, CFTypeRef);
 
 static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry, CFStringRef propertyName, CFTypeRef property) {
@@ -43,42 +35,45 @@ static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry
 
     NSInteger mode = getRealTimeMitigationMode();
     BOOL blockDimming = getRealTimeBlockDimming();
-    BOOL forceFastCharge = getRealTimeForceFastCharge(); 
+    BOOL forceFastCharge = getRealTimeForceFastCharge();
     NSString *propStr = (__bridge NSString *)propertyName;
     
-    // 🟢 [BUG 2 Fix] 彻底治愈温控暗屏！强行扔掉所有底层显示驱动的降亮限制
+    // 🟢 [BUG 2 Fix] 防止暗屏强化拦截，彻底摧毁系统试图下发亮度降温的任何念头
     if (blockDimming) {
-        if ([propStr containsString:@"brightness"] ||
-            [propStr containsString:@"Thermal"] ||
-            [propStr containsString:@"Mitigation"] ||
-            [propStr containsString:@"Limit"]) {
-            return KERN_SUCCESS; // 拦截并骗苹果底层已成功下发指令
+        if ([propStr isEqualToString:@"max-brightness"] ||
+            [propStr isEqualToString:@"brightness-limit"] ||
+            [propStr isEqualToString:@"IOMFB_brightness_limit"] ||
+            [propStr containsString:@"ThermalMitigation"] ||
+            [propStr containsString:@"ThermalLimit"]) {
+            return KERN_SUCCESS; // 直接假装成功，不交给系统底层
         }
     }
 
-    // 🟢 [BUG 3 Fix] 【独家】满血快充绕过 70% 电池降速
-    // iOS 电池到 70% ~ 80% 或发热时，会自动下发很小的充电限制（如 500mA）。
-    // 我们不仅拦截降流指令，还强行把它锁在极高值 5000mA (5A)，强迫主板芯片硬件跑满原装功率！
+    // 🟢 [BUG 3 Fix] 强制满血快充，粉碎系统 70% 后台偷切的 SmartChargeInhibit
     if (forceFastCharge) {
         if ([propStr containsString:@"ChargeCurrent"] ||
             [propStr containsString:@"ChargeLimit"] ||
             [propStr containsString:@"MaxCharge"] ||
             [propStr containsString:@"ChargeRate"]) {
+            // 无论系统怎么压降，永远往里强灌 5A/5000mA，撑满协议最高带宽
             orig_IORegistryEntrySetCFProperty(entry, propertyName, (__bridge CFTypeRef)@(5000));
+            return KERN_SUCCESS;
+        }
+        if ([propStr containsString:@"ChargeInhibit"] || [propStr containsString:@"SmartCharge"]) {
+            // 拒绝系统对电池的“暂停/优化充电”休眠指令
+            orig_IORegistryEntrySetCFProperty(entry, propertyName, kCFBooleanFalse);
             return KERN_SUCCESS;
         }
     }
 
     if (mode == 1) { 
         if ([propStr isEqualToString:@"p-state-cap"] || [propStr isEqualToString:@"CPU_Ceiling"] || [propStr isEqualToString:@"CPU_Floor"]) {
-            orig_IORegistryEntrySetCFProperty(entry, propertyName, (__bridge CFTypeRef)@(2));
-            return KERN_SUCCESS; 
+            orig_IORegistryEntrySetCFProperty(entry, propertyName, (__bridge CFTypeRef)@(2)); return KERN_SUCCESS; 
         }
     } 
     else if (mode == 2) { 
         if ([propStr isEqualToString:@"p-state-cap"] || [propStr isEqualToString:@"CPU_Ceiling"]) {
-            orig_IORegistryEntrySetCFProperty(entry, propertyName, (__bridge CFTypeRef)@(15));
-            return KERN_SUCCESS; 
+            orig_IORegistryEntrySetCFProperty(entry, propertyName, (__bridge CFTypeRef)@(15)); return KERN_SUCCESS; 
         }
     }
 
@@ -95,70 +90,51 @@ static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry
 @end
 
 %hook MitigationController
-
 - (void)setPowerSaveActive:(BOOL)active {
     NSInteger mode = getRealTimeMitigationMode();
     if (mode == 1) { %orig(YES); return; }
     if (mode == 2) { %orig(NO); return; }
     %orig(active);
 }
-
 - (void)setCPULevel:(int)level {
     NSInteger mode = getRealTimeMitigationMode();
     if (mode == 1) { %orig(2); return; }
     if (mode == 2) { %orig(0); return; }
     %orig(level);
 }
-
 - (void)setCPULowPowerTarget:(int)power {
     NSInteger mode = getRealTimeMitigationMode();
     if (mode == 2) { %orig(MAX(power, InsulationUnrestrictedPowerTarget)); return; }
     %orig(power);
 }
-
 - (void)setCPUPowerCeiling:(int)power fromDecisionSource:(int)source {
     NSInteger mode = getRealTimeMitigationMode();
     if (mode == 2) { %orig(MAX(power, InsulationUnrestrictedPowerTarget), source); return; }
     %orig(power, source);
 }
-
 - (void)setCPUPowerZoneTarget:(int)power {
     NSInteger mode = getRealTimeMitigationMode();
     if (mode == 2) { %orig(MAX(power, InsulationUnrestrictedPowerTarget)); return; }
     %orig(power);
 }
-
 - (void)updateCPU {
     NSInteger mode = getRealTimeMitigationMode();
-    if (mode == 1) {
-        [self setPowerSaveActive:YES];
-        [self setCPULevel:2];
-    } else if (mode == 2) {
-        [self setPowerSaveActive:NO];
-        [self setCPULevel:0];
-    }
+    if (mode == 1) { [self setPowerSaveActive:YES]; [self setCPULevel:2]; } 
+    else if (mode == 2) { [self setPowerSaveActive:NO]; [self setCPULevel:0]; }
     %orig;
 }
-
 %end
 
 %ctor {
     NSString *processName = [NSProcessInfo processInfo].processName;
-    
     if ([processName isEqualToString:@"thermalmonitord"] || [processName isEqualToString:@"powerd"]) {
-        
         %init;
-        
-        // 🚀 动态内存寻址 Hook IOKit 硬件接口，控制暗屏与频率的命脉
         void *ioKitHandle = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW);
         if (ioKitHandle) {
             void *funcPtr = dlsym(ioKitHandle, "IORegistryEntrySetCFProperty");
-            if (funcPtr) {
-                MSHookFunction(funcPtr, (void *)hook_IORegistryEntrySetCFProperty, (void **)&orig_IORegistryEntrySetCFProperty);
-            }
+            if (funcPtr) MSHookFunction(funcPtr, (void *)hook_IORegistryEntrySetCFProperty, (void **)&orig_IORegistryEntrySetCFProperty);
         }
 
-        // 底层守护强力心跳
         dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0));
         dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 1.0 * NSEC_PER_SEC), 1.0 * NSEC_PER_SEC, 0.1 * NSEC_PER_SEC);
         dispatch_source_set_event_handler(timer, ^{
@@ -176,3 +152,4 @@ static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry
         dispatch_resume(timer);
     }
 }
+
