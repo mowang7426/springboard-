@@ -16,7 +16,7 @@
 #import <CoreMotion/CoreMotion.h>
 #import <notify.h>
 #import <objc/runtime.h>
-#import <objc/message.h>
+#import <objc/message.h> // 必须引入以支持底层的 objc_msgSend 0延迟跳转
 
 #ifndef kIOMainPortDefault
 #define kIOMainPortDefault kIOMasterPortDefault
@@ -82,14 +82,19 @@ typedef struct {
 @property (nonatomic, strong) NSDate *timestamp;
 @property (nonatomic, strong) id originalRequest;
 @end
-@implementation SBNotifReq
+
+// 🟢 这里是 SBNotificationManager 的声明，千万别被旧代码覆盖了
+@interface SBNotificationManager : NSObject
++ (instancetype)sharedInstance;
+- (void)extractAndHandleRequest:(id)req;
+- (void)handleNewNotification:(SBNotifReq *)req;
 @end
 
 @interface SBCPUFloatingView : UIView <UIGestureRecognizerDelegate>
 @property (nonatomic, assign) CGPoint lastPoint;
 @property (nonatomic, strong) UIVisualEffectView *blurView;
 @property (nonatomic, strong) CAShapeLayer *marqueeLayer;
-@property (nonatomic, strong) UIView *horizontalDiv; // 🟢 新增：上下分层的高级分割线
+@property (nonatomic, strong) UIView *horizontalDiv; // 🟢 上下分层的高级分割线
 
 // 📊 性能数据专用容器
 @property (nonatomic, strong) UIView *performanceContainer; 
@@ -135,6 +140,8 @@ typedef struct {
 
 @property (nonatomic, assign) BOOL isCollapsed;
 @property (nonatomic, strong) NSTimer *inactivityTimer;
+@property (nonatomic, strong) UITapGestureRecognizer *singleTapGesture;
+@property (nonatomic, strong) UILongPressGestureRecognizer *longPressGesture;
 
 - (void)resetInactivityTimer;
 - (void)collapseToEdgeAnimated:(BOOL)animated;
@@ -241,7 +248,8 @@ static BOOL hideContentOnLockScreen = NO;
 static NSInteger notificationDuration = 5;
 static NSMutableArray<SBNotifReq *> *historyNotifications = nil;
 
-// 🟢 极其重要的前置声明：解决 [self updateFloatingSize] 找不到方法的报错
+// 🟢 函数前置声明，防止编译器报 undeclared identifier
+static void applyFloatingAlpha(void);
 static void updateFloatingSize(void);
 static void openDetailView(void);
 static void openSettings(void);
@@ -325,6 +333,18 @@ static void setIntPref(CFStringRef key, NSInteger value) {
     CFRelease(num);
 }
 
+static void applyVisibility(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (cpuWindow) cpuWindow.hidden = !isEnabled;
+    });
+}
+
+static void applyFloatingAlpha(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (floatingView) floatingView.alpha = floatingAlphaEnable ? floatingAlpha : 1.0;
+    });
+}
+
 static void LoadPreferences(void) {
     CFPreferencesAppSynchronize(kPrefAppID);
 
@@ -376,9 +396,7 @@ static void LoadPreferences(void) {
     notificationDuration = getIntPref(CFSTR("notificationDuration"), 5);
 
     if ([[NSProcessInfo processInfo].processName isEqualToString:@"SpringBoard"]) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (cpuWindow) cpuWindow.hidden = !isEnabled;
-        });
+        applyVisibility();
         if (showFps || force120HzEnable || collapsedDisplayMode == 1) {
             [[SBCPUFPSHelper sharedInstance] startMonitoring];
         } else {
@@ -464,6 +482,24 @@ static void setHardwareChargingInhibit(BOOL inhibit) {
     if (pmuService) {
         IORegistryEntrySetCFProperty(pmuService, CFSTR("ChargeInhibit"), inhibit ? kCFBooleanTrue : kCFBooleanFalse);
         IOObjectRelease(pmuService);
+    }
+}
+
+static void setForceFastChargeOverride(BOOL force) {
+    if (!force) return;
+    io_service_t managerService = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBatteryManager"));
+    if (managerService) {
+        IORegistryEntrySetCFProperty(managerService, CFSTR("SmartChargingAppOverride"), kCFBooleanTrue);
+        IORegistryEntrySetCFProperty(managerService, CFSTR("SmartChargingOverride"), kCFBooleanTrue); // 彻底关闭 OBC 优化充电
+        IOObjectRelease(managerService);
+    }
+    io_service_t batService = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBattery"));
+    if (batService) {
+        int limit = 100;
+        CFNumberRef limitNum = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &limit);
+        IORegistryEntrySetCFProperty(batService, CFSTR("ChargeLimit"), limitNum);
+        CFRelease(limitNum);
+        IOObjectRelease(batService);
     }
 }
 
@@ -674,7 +710,6 @@ static void clampAndPositionFloatingView(CGPoint targetCenter, BOOL animate) {
         
         CGFloat colMinX = targetHalfW + 4.0f;
         CGFloat colMaxX = containerBounds.size.width - targetHalfW - 4.0f;
-        
         CGFloat colMinY = targetHalfH + 20.0f;
         CGFloat colMaxY = containerBounds.size.height - targetHalfH - 10.0f;
 
@@ -780,9 +815,7 @@ static void createCPUWindow(void) {
     floatingView = [[SBCPUFloatingView alloc] initWithFrame:initFrame];
     [cpuWindow.rootViewController.view addSubview:floatingView];
 
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (floatingView) floatingView.alpha = floatingAlphaEnable ? floatingAlpha : 1.0;
-    });
+    applyFloatingAlpha();
     updateFloatingSize();
 }
 
@@ -914,6 +947,7 @@ static void updateCPU(void) {
             floatingView.statusLabel.textColor = [UIColor systemOrangeColor];
             floatingView.statusDot.backgroundColor = [UIColor systemOrangeColor];
         } else if (forceFastChargeEnable && charging) {
+            setForceFastChargeOverride(YES);
             floatingView.statusLabel.text = @"⚡ 满血快充无视限制中";
             floatingView.statusLabel.textColor = [UIColor systemRedColor];
         }
@@ -957,7 +991,7 @@ static void applySystemRefreshRate(void) {
     [[SBCPUFPSHelper sharedInstance] updateFrameRate];
 }
 
-#pragma mark - 7. 所有的 Objective-C 类实现区块
+#pragma mark - 5. Notification Manager 实现
 
 @implementation SBNotificationManager
 + (instancetype)sharedInstance {
@@ -1023,6 +1057,9 @@ static void applySystemRefreshRate(void) {
     });
 }
 @end
+
+
+#pragma mark - 7. 所有的 Objective-C 类实现区块
 
 @implementation SBCPUFPSHelper {
     CADisplayLink *_displayLink;
@@ -1146,20 +1183,21 @@ static void applySystemRefreshRate(void) {
         pan.delegate = self;
         [self addGestureRecognizer:pan];
 
-        _singleTapGesture = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleSingleTap:)];
-        _singleTapGesture.delegate = self;
-        [self addGestureRecognizer:_singleTapGesture];
+        // 🟢 使用 self.xxx 安全赋值，避免编译器报错
+        self.singleTapGesture = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleSingleTap:)];
+        self.singleTapGesture.delegate = self;
+        [self addGestureRecognizer:self.singleTapGesture];
 
         UITapGestureRecognizer *doubleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleDoubleTap:)];
         doubleTap.numberOfTapsRequired = 2;
         doubleTap.delegate = self;
         [self addGestureRecognizer:doubleTap];
-        [_singleTapGesture requireGestureRecognizerToFail:doubleTap];
+        [self.singleTapGesture requireGestureRecognizerToFail:doubleTap];
 
-        _longPressGesture = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleLongPress:)];
-        _longPressGesture.minimumPressDuration = 0.6;
-        _longPressGesture.delegate = self;
-        [self addGestureRecognizer:_longPressGesture];
+        self.longPressGesture = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleLongPress:)];
+        self.longPressGesture.minimumPressDuration = 0.6;
+        self.longPressGesture.delegate = self;
+        [self addGestureRecognizer:self.longPressGesture];
 
         self.layer.shadowColor = [UIColor blackColor].CGColor;
         self.layer.shadowOpacity = 0.18f;
@@ -1345,6 +1383,7 @@ static void applySystemRefreshRate(void) {
         _miniCpuLabel.textAlignment = NSTextAlignmentLeft;
         [_collapsedContainerView addSubview:_miniCpuLabel];
         
+        // 🏝️ 灵动岛通知容器，保证足够的宽高不裁切
         _notificationContainer = [[UIView alloc] initWithFrame:content.bounds];
         _notificationContainer.userInteractionEnabled = NO;
         _notificationContainer.alpha = 0.0;
@@ -1352,18 +1391,18 @@ static void applySystemRefreshRate(void) {
         [content addSubview:_notificationContainer];
 
         _notifAppNameLabel = [[UILabel alloc] init];
-        _notifAppNameLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightBold];
-        _notifAppNameLabel.textColor = [UIColor blackColor];
+        _notifAppNameLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightBold];
+        _notifAppNameLabel.textColor = [UIColor darkGrayColor];
         [_notificationContainer addSubview:_notifAppNameLabel];
 
         _notifSenderLabel = [[UILabel alloc] init];
-        _notifSenderLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightBold];
+        _notifSenderLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightBold];
         _notifSenderLabel.textColor = [UIColor blackColor];
         [_notificationContainer addSubview:_notifSenderLabel];
 
         _notifMessageLabel = [[UILabel alloc] init];
-        _notifMessageLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightRegular];
-        _notifMessageLabel.textColor = [UIColor darkGrayColor];
+        _notifMessageLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+        _notifMessageLabel.textColor = [UIColor colorWithWhite:0.2 alpha:1.0];
         _notifMessageLabel.numberOfLines = 2;
         [_notificationContainer addSubview:_notifMessageLabel];
 
@@ -1394,77 +1433,86 @@ static void applySystemRefreshRate(void) {
     }
 }
 
-// 🚀 [终极修复] 0延迟安全跳转与 Payload 直达！采用 NSInvocation 规避一切编译器语法报错。
+// 🚀 [终极无敌修复制霸版]：0延迟安全跳转与 Payload 直达！采用 objc_msgSend 完美规避一切编译器指针语法报错！
 - (void)handleSingleTap:(UITapGestureRecognizer *)tap {
     if (tap.state == UIGestureRecognizerStateEnded) {
-        if (_isShowingNotification && _currentNotification) {
-            NSString *bundleID = _currentNotification.bundleID;
-            id req = _currentNotification.originalRequest;
-            [self hideNotification]; 
-            
-            dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-                id userInfo = nil;
-                @try {
-                    // 安全提取 Payload
-                    id userNotif = [req respondsToSelector:@selector(userNotification)] ? [req performSelector:@selector(userNotification)] : nil;
-                    userInfo = [userNotif respondsToSelector:@selector(userInfo)] ? [userNotif performSelector:@selector(userInfo)] : nil;
-                    if (!userInfo) {
-                        id bulletin = [req respondsToSelector:@selector(bulletin)] ? [req performSelector:@selector(bulletin)] : nil;
-                        userInfo = [bulletin respondsToSelector:@selector(userInfo)] ? [bulletin performSelector:@selector(userInfo)] : nil;
-                    }
-                } @catch (NSException *e) {}
+        BOOL hasUnread = (historyNotifications.count > 0);
+        BOOL combinedModeVisible = (!self.isCollapsed && hasUnread) || self.isShowingNotification;
 
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    BOOL opened = NO;
-                    Class fbsClass = NSClassFromString(@"FBSOpenApplicationService");
-                    Class optsClass = NSClassFromString(@"FBSOpenApplicationOptions");
-                    
-                    if (fbsClass && optsClass) {
-                        id fbsService = [fbsClass performSelector:@selector(sharedInstance)];
-                        SEL openSel = NSSelectorFromString(@"openApplication:withOptions:completion:");
+        if (combinedModeVisible) {
+            SBNotifReq *targetReq = self.currentNotification ?: historyNotifications.firstObject;
+            if (targetReq) {
+                NSString *bundleID = targetReq.bundleID;
+                id reqObj = targetReq.originalRequest;
+                
+                self.isShowingNotification = NO;
+                self.currentNotification = nil;
+                [historyNotifications removeAllObjects];
+                
+                [self collapseToEdgeAnimated:YES];
+                
+                dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+                    id userInfo = nil;
+                    @try {
+                        id userNotif = [reqObj respondsToSelector:@selector(userNotification)] ? [reqObj performSelector:@selector(userNotification)] : nil;
+                        userInfo = [userNotif respondsToSelector:@selector(userInfo)] ? [userNotif performSelector:@selector(userInfo)] : nil;
+                        if (!userInfo) {
+                            id bulletin = [reqObj respondsToSelector:@selector(bulletin)] ? [reqObj performSelector:@selector(bulletin)] : nil;
+                            userInfo = [bulletin respondsToSelector:@selector(userInfo)] ? [bulletin performSelector:@selector(userInfo)] : nil;
+                        }
+                    } @catch (NSException *e) {}
+
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        BOOL opened = NO;
+                        Class fbsClass = NSClassFromString(@"FBSOpenApplicationService");
+                        Class optsClass = NSClassFromString(@"FBSOpenApplicationOptions");
                         
-                        if ([fbsService respondsToSelector:openSel]) {
-                            NSMutableDictionary *dict = [NSMutableDictionary dictionary];
-                            dict[@"__UnlockPrompt"] = @YES; 
-                            if (userInfo) {
-                                dict[@"__Payload"] = userInfo;
-                                dict[@"bks-open-application-options-notification-payload"] = userInfo;
-                            }
+                        if (fbsClass && optsClass) {
+                            id fbsService = [fbsClass performSelector:@selector(sharedInstance)];
+                            SEL openSel = NSSelectorFromString(@"openApplication:withOptions:completion:");
                             
-                            id fbsOptions = [optsClass performSelector:@selector(optionsWithDictionary:) withObject:dict];
-                            
-                            // 必须传递一个空 block 才能终结 6 秒的 XPC 卡死等待
-                            void (^completionBlock)(id) = ^(id error) {}; 
+                            if ([fbsService respondsToSelector:openSel]) {
+                                NSMutableDictionary *dict = [NSMutableDictionary dictionary];
+                                dict[@"__UnlockPrompt"] = @YES; 
+                                if (userInfo) {
+                                    dict[@"__Payload"] = userInfo;
+                                    dict[@"bks-open-application-options-notification-payload"] = userInfo;
+                                }
+                                
+                                id fbsOptions = [optsClass performSelector:@selector(optionsWithDictionary:) withObject:dict];
+                                
+                                // 必须传递一个空 block 才能终结 6 秒的 XPC 卡死等待
+                                void (^completionBlock)(id) = ^(id error) {}; 
 
-                            NSMethodSignature *sig = [fbsService methodSignatureForSelector:openSel];
-                            NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-                            [inv setTarget:fbsService];
-                            [inv setSelector:openSel];
-                            [inv setArgument:&bundleID atIndex:2];
-                            [inv setArgument:&fbsOptions atIndex:3];
-                            [inv setArgument:&completionBlock atIndex:4]; // 关键破局点
-                            [inv invoke];
-                            opened = YES;
-                        }
-                    }
-                    
-                    // 兜底方案，绝不留死角
-                    if (!opened) {
-                        Class lsawClass = NSClassFromString(@"LSApplicationWorkspace");
-                        if (lsawClass && [lsawClass respondsToSelector:@selector(defaultWorkspace)]) {
-                            id workspace = [lsawClass performSelector:@selector(defaultWorkspace)];
-                            if ([workspace respondsToSelector:@selector(openApplicationWithBundleID:)]) {
-                                [workspace performSelector:@selector(openApplicationWithBundleID:) withObject:bundleID];
+                                // 👑 终极杀招：直接使用 C 语言的 objc_msgSend，彻底无视 Theos 的强制安全检查
+                                ((void (*)(id, SEL, id, id, id))objc_msgSend)(fbsService, openSel, bundleID, fbsOptions, completionBlock);
+                                
+                                opened = YES;
                             }
                         }
-                    }
+                        
+                        // 兜底方案，绝不留死角
+                        if (!opened) {
+                            Class lsawClass = NSClassFromString(@"LSApplicationWorkspace");
+                            if (lsawClass && [lsawClass respondsToSelector:@selector(defaultWorkspace)]) {
+                                id workspace = [lsawClass performSelector:@selector(defaultWorkspace)];
+                                if ([workspace respondsToSelector:@selector(openApplicationWithBundleID:)]) {
+                                    [workspace performSelector:@selector(openApplicationWithBundleID:) withObject:bundleID];
+                                }
+                            }
+                        }
+                    });
                 });
-            });
-            UIImpactFeedbackGenerator *g = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
-            [g prepare]; [g impactOccurred];
+                UIImpactFeedbackGenerator *g = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+                [g prepare]; [g impactOccurred];
+                return;
+            }
+        }
+        
+        if (self.isCollapsed) {
+            [self expandFromEdgeAnimated:YES];
         } else {
-            if (_isCollapsed) [self expandFromEdgeAnimated:YES];
-            else [self resetInactivityTimer];
+            [self resetInactivityTimer];
         }
     }
 }
@@ -1542,13 +1590,13 @@ static void applySystemRefreshRate(void) {
                          isCharging:(BOOL)isCharging {
     
     // 角标处理
-    BOOL hasUnread = (historyNotifications.count > 0 && !_isShowingNotification);
+    BOOL hasUnread = (historyNotifications.count > 0 && !self.isShowingNotification);
     self.badgeLabel.hidden = !hasUnread;
     if (hasUnread) self.badgeLabel.text = [NSString stringWithFormat:@"%lu", (unsigned long)historyNotifications.count];
 
-    if (_isCollapsed) return;
+    if (self.isCollapsed) return;
 
-    BOOL showCombinedMode = (_isShowingNotification || _notificationQueue.count > 0);
+    BOOL showCombinedMode = (!self.isCollapsed && historyNotifications.count > 0) || self.isShowingNotification;
 
     self.performanceContainer.hidden = NO;
     self.performanceContainer.alpha = 1.0;
@@ -1639,7 +1687,7 @@ static void applySystemRefreshRate(void) {
 
     CGFloat finalW = currentX + 10.0f; 
     if (finalW < 40.0f) finalW = 40.0f;
-    if (showCombinedMode && finalW < 270.0f) finalW = 270.0f; // 为通知预留足够宽度
+    if (showCombinedMode && finalW < 280.0f) finalW = 280.0f; // 为通知强制拉宽
     
     CGFloat currentY = padY + 44.0f; 
 
@@ -1652,7 +1700,7 @@ static void applySystemRefreshRate(void) {
         currentY += 14.0f;
     }
 
-    // --- 🟢 下方铺设通知分层 ---
+    // --- 🟢 下方铺设通知分层模块，完美复刻 UI ---
     if (showCombinedMode) {
         self.horizontalDiv.hidden = NO;
         self.notificationContainer.hidden = NO;
@@ -1662,13 +1710,17 @@ static void applySystemRefreshRate(void) {
         self.horizontalDiv.frame = CGRectMake(16.0f, currentY, finalW - 32.0f, 0.5f);
         currentY += 8.0f;
 
-        SBNotifReq *req = self.currentNotification ?: self.notificationQueue.firstObject;
+        SBNotifReq *req = self.currentNotification ?: historyNotifications.firstObject;
         NSString *appName = @"消息";
-        if ([req.bundleID isEqualToString:@"com.tencent.xin"]) appName = @"🟢 微信";
-        else if ([req.bundleID isEqualToString:@"com.tencent.mobileqq"]) appName = @"🔵 QQ";
-        else if ([req.bundleID isEqualToString:@"com.tencent.tim"]) appName = @"🔷 TIM";
+        NSString *icon = @"💬";
+        if ([req.bundleID isEqualToString:@"com.tencent.xin"]) { appName = @"微信"; icon = @"🟢"; }
+        else if ([req.bundleID isEqualToString:@"com.tencent.mobileqq"]) { appName = @"QQ"; icon = @"🔵"; }
+        else if ([req.bundleID isEqualToString:@"com.tencent.tim"]) { appName = @"TIM"; icon = @"🔷"; }
         
-        self.notifAppNameLabel.text = [NSString stringWithFormat:@"%@ (%lu)", appName, (unsigned long)(self.isShowingNotification ? self.notificationQueue.count : historyNotifications.count)];
+        NSUInteger count = historyNotifications.count;
+        if (count == 0 && self.currentNotification) count = 1;
+        
+        self.notifAppNameLabel.text = [NSString stringWithFormat:@"%@ %@ (%lu)", icon, appName, (unsigned long)count];
         self.notifSenderLabel.text = req.title;
         
         BOOL isLocked = NO;
@@ -1679,9 +1731,9 @@ static void applySystemRefreshRate(void) {
         self.notifMessageLabel.text = (hideContentOnLockScreen && isLocked) ? @"你收到一条新消息" : req.message;
 
         self.notificationContainer.frame = CGRectMake(0, currentY, finalW, 70.0f);
-        self.notifAppNameLabel.frame = CGRectMake(20.0f, 0, finalW - 40.0f, 14.0f);
-        self.notifSenderLabel.frame = CGRectMake(20.0f, 18.0f, finalW - 40.0f, 18.0f);
-        self.notifMessageLabel.frame = CGRectMake(20.0f, 38.0f, finalW - 40.0f, 32.0f);
+        self.notifAppNameLabel.frame = CGRectMake(16.0f, 0, finalW - 32.0f, 16.0f);
+        self.notifSenderLabel.frame = CGRectMake(16.0f, 20.0f, finalW - 32.0f, 20.0f);
+        self.notifMessageLabel.frame = CGRectMake(16.0f, 42.0f, finalW - 32.0f, 28.0f);
 
         currentY += 70.0f;
     } else {
@@ -1722,7 +1774,6 @@ static void applySystemRefreshRate(void) {
 
     self.bounds = CGRectMake(0, 0, finalW, currentY);
     self.performanceContainer.frame = self.bounds;
-    // self.notificationContainer.frame is relative to parent self.bounds
 }
 
 - (void)resetInactivityTimer {
@@ -1730,7 +1781,7 @@ static void applySystemRefreshRate(void) {
         [_inactivityTimer invalidate];
         _inactivityTimer = nil;
     }
-    if (autoCollapseEnable && !_isCollapsed && !settingsShowing && !detailShowing && !_isShowingNotification) {
+    if (autoCollapseEnable && !_isCollapsed && !settingsShowing && !detailShowing && !self.isShowingNotification) {
         if (autoExpandLandscape) {
             UIInterfaceOrientation orientation = getActiveInterfaceOrientation();
             BOOL isLandscape = (orientation == UIInterfaceOrientationLandscapeLeft || orientation == UIInterfaceOrientationLandscapeRight);
@@ -1749,7 +1800,7 @@ static void applySystemRefreshRate(void) {
     [_inactivityTimer invalidate];
     _inactivityTimer = nil; 
 
-    if (!settingsShowing && !detailShowing && !_isCollapsed && !_isShowingNotification) {
+    if (!settingsShowing && !detailShowing && !_isCollapsed && !self.isShowingNotification) {
         UIInterfaceOrientation orientation = getActiveInterfaceOrientation();
         BOOL isLandscape = (orientation == UIInterfaceOrientationLandscapeLeft || orientation == UIInterfaceOrientationLandscapeRight);
         if (autoExpandLandscape && isLandscape) {
@@ -1760,7 +1811,7 @@ static void applySystemRefreshRate(void) {
 }
 
 - (void)collapseToEdgeAnimated:(BOOL)animated {
-    if (_isCollapsed || _isShowingNotification) return;
+    if (_isCollapsed || self.isShowingNotification) return;
     _isCollapsed = YES;
 
     UIView *parent = self.superview;
@@ -1828,7 +1879,7 @@ static void applySystemRefreshRate(void) {
 }
 
 - (void)expandFromEdgeAnimated:(BOOL)animated {
-    if (!_isCollapsed || _isShowingNotification) {
+    if (!_isCollapsed || self.isShowingNotification) {
         [self resetInactivityTimer];
         return;
     }
@@ -1887,20 +1938,20 @@ static void applySystemRefreshRate(void) {
 }
 
 - (void)showNotification:(SBNotifReq *)req {
-    if (!_isShowingNotification) {
+    if (!self.isShowingNotification) {
         self.wasCollapsedBeforeNotification = self.isCollapsed;
     }
-    _isShowingNotification = YES;
-    _currentNotification = req;
+    self.isShowingNotification = YES;
+    self.currentNotification = req;
     
-    if (_isCollapsed) {
-        _isCollapsed = NO; 
+    if (self.isCollapsed) {
+        self.isCollapsed = NO; 
     }
     
-    [_inactivityTimer invalidate]; _inactivityTimer = nil;
+    [self.inactivityTimer invalidate]; self.inactivityTimer = nil;
     
-    [_notificationTimer invalidate];
-    _notificationTimer = [NSTimer scheduledTimerWithTimeInterval:notificationDuration target:self selector:@selector(hideNotification) userInfo:nil repeats:NO];
+    [self.notificationTimer invalidate];
+    self.notificationTimer = [NSTimer scheduledTimerWithTimeInterval:notificationDuration target:self selector:@selector(hideNotification) userInfo:nil repeats:NO];
     
     [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionBeginFromCurrentState animations:^{
         updateFloatingSize(); 
@@ -1908,14 +1959,14 @@ static void applySystemRefreshRate(void) {
 }
 
 - (void)hideNotification {
-    if (_notificationQueue.count > 0) [_notificationQueue removeObjectAtIndex:0];
-    if (_notificationQueue.count > 0) {
-        [self showNotification:_notificationQueue.firstObject];
+    if (self.notificationQueue.count > 0) [self.notificationQueue removeObjectAtIndex:0];
+    if (self.notificationQueue.count > 0) {
+        [self showNotification:self.notificationQueue.firstObject];
         return;
     }
     
-    _isShowingNotification = NO;
-    _currentNotification = nil;
+    self.isShowingNotification = NO;
+    self.currentNotification = nil;
     
     if (self.wasCollapsedBeforeNotification) {
         [self collapseToEdgeAnimated:YES];
@@ -2404,7 +2455,7 @@ static void applySystemRefreshRate(void) {
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { 
     (void)tableView;
-    return 10; // 🟢 补回了功能说明板块
+    return 10; // 🟢 包含功能说明板块
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
