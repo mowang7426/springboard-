@@ -22,12 +22,19 @@ static uint64_t getRealTimeState() {
     return state;
 }
 
-static NSInteger getRealTimeMitigationMode() { return getRealTimeState() & 0xFF; }
-static BOOL getRealTimeBlockDimming() { return (getRealTimeState() >> 8) & 1; }
-static BOOL getRealTimeForceFastCharge() { return (getRealTimeState() >> 9) & 1; }
+static NSInteger getRealTimeMitigationMode() {
+    return getRealTimeState() & 0xFF;
+}
 
+static BOOL getRealTimeBlockDimming() {
+    return (getRealTimeState() >> 8) & 1;
+}
 
-// 👑 [绝杀机制]：C语言底层 IOKit 硬件拦截中心
+static BOOL getRealTimeForceFastCharge() {
+    return (getRealTimeState() >> 9) & 1;
+}
+
+// 👑 [绝杀机制]：C语言底层 IOKit 硬件拦截
 static kern_return_t (*orig_IORegistryEntrySetCFProperty)(io_registry_entry_t, CFStringRef, CFTypeRef);
 
 static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry, CFStringRef propertyName, CFTypeRef property) {
@@ -35,32 +42,33 @@ static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry
 
     NSInteger mode = getRealTimeMitigationMode();
     BOOL blockDimming = getRealTimeBlockDimming();
-    BOOL forceFastCharge = getRealTimeForceFastCharge();
+    BOOL forceFastCharge = getRealTimeForceFastCharge(); 
     NSString *propStr = (__bridge NSString *)propertyName;
     
-    // 🟢 [BUG 2 Fix] 防止暗屏强化拦截，彻底摧毁系统试图下发亮度降温的任何念头
     if (blockDimming) {
-        if ([propStr isEqualToString:@"max-brightness"] ||
-            [propStr isEqualToString:@"brightness-limit"] ||
-            [propStr isEqualToString:@"IOMFB_brightness_limit"] ||
+        if ([propStr containsString:@"max-brightness"] ||
+            [propStr containsString:@"brightness-limit"] ||
+            [propStr containsString:@"IOMFB_brightness_limit"] ||
             [propStr containsString:@"ThermalMitigation"] ||
             [propStr containsString:@"ThermalLimit"]) {
-            return KERN_SUCCESS; // 直接假装成功，不交给系统底层
+            return KERN_SUCCESS; 
         }
     }
 
-    // 🟢 [BUG 3 Fix] 强制满血快充，粉碎系统 70% 后台偷切的 SmartChargeInhibit
+    // 🚀 [BUG 3 Fix] 强力打破 iOS 电池优化与高温断流
     if (forceFastCharge) {
+        // iOS 经常会在 70%、80% 或者发热时下发 500mA 的限流指令
         if ([propStr containsString:@"ChargeCurrent"] ||
             [propStr containsString:@"ChargeLimit"] ||
             [propStr containsString:@"MaxCharge"] ||
             [propStr containsString:@"ChargeRate"]) {
-            // 无论系统怎么压降，永远往里强灌 5A/5000mA，撑满协议最高带宽
+            // 直接覆盖系统指令，强写 5000mA 进去，榨干主板快充极限
             orig_IORegistryEntrySetCFProperty(entry, propertyName, (__bridge CFTypeRef)@(5000));
             return KERN_SUCCESS;
         }
+        
+        // 粉碎 iOS 原生的"优化电池充电"休眠机制
         if ([propStr containsString:@"ChargeInhibit"] || [propStr containsString:@"SmartCharge"]) {
-            // 拒绝系统对电池的“暂停/优化充电”休眠指令
             orig_IORegistryEntrySetCFProperty(entry, propertyName, kCFBooleanFalse);
             return KERN_SUCCESS;
         }
@@ -68,12 +76,14 @@ static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry
 
     if (mode == 1) { 
         if ([propStr isEqualToString:@"p-state-cap"] || [propStr isEqualToString:@"CPU_Ceiling"] || [propStr isEqualToString:@"CPU_Floor"]) {
-            orig_IORegistryEntrySetCFProperty(entry, propertyName, (__bridge CFTypeRef)@(2)); return KERN_SUCCESS; 
+            orig_IORegistryEntrySetCFProperty(entry, propertyName, (__bridge CFTypeRef)@(2));
+            return KERN_SUCCESS; 
         }
     } 
     else if (mode == 2) { 
         if ([propStr isEqualToString:@"p-state-cap"] || [propStr isEqualToString:@"CPU_Ceiling"]) {
-            orig_IORegistryEntrySetCFProperty(entry, propertyName, (__bridge CFTypeRef)@(15)); return KERN_SUCCESS; 
+            orig_IORegistryEntrySetCFProperty(entry, propertyName, (__bridge CFTypeRef)@(15));
+            return KERN_SUCCESS; 
         }
     }
 
@@ -90,49 +100,66 @@ static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry
 @end
 
 %hook MitigationController
+
 - (void)setPowerSaveActive:(BOOL)active {
     NSInteger mode = getRealTimeMitigationMode();
     if (mode == 1) { %orig(YES); return; }
     if (mode == 2) { %orig(NO); return; }
     %orig(active);
 }
+
 - (void)setCPULevel:(int)level {
     NSInteger mode = getRealTimeMitigationMode();
     if (mode == 1) { %orig(2); return; }
     if (mode == 2) { %orig(0); return; }
     %orig(level);
 }
+
 - (void)setCPULowPowerTarget:(int)power {
     NSInteger mode = getRealTimeMitigationMode();
     if (mode == 2) { %orig(MAX(power, InsulationUnrestrictedPowerTarget)); return; }
     %orig(power);
 }
+
 - (void)setCPUPowerCeiling:(int)power fromDecisionSource:(int)source {
     NSInteger mode = getRealTimeMitigationMode();
     if (mode == 2) { %orig(MAX(power, InsulationUnrestrictedPowerTarget), source); return; }
     %orig(power, source);
 }
+
 - (void)setCPUPowerZoneTarget:(int)power {
     NSInteger mode = getRealTimeMitigationMode();
     if (mode == 2) { %orig(MAX(power, InsulationUnrestrictedPowerTarget)); return; }
     %orig(power);
 }
+
 - (void)updateCPU {
     NSInteger mode = getRealTimeMitigationMode();
-    if (mode == 1) { [self setPowerSaveActive:YES]; [self setCPULevel:2]; } 
-    else if (mode == 2) { [self setPowerSaveActive:NO]; [self setCPULevel:0]; }
+    if (mode == 1) {
+        [self setPowerSaveActive:YES];
+        [self setCPULevel:2];
+    } else if (mode == 2) {
+        [self setPowerSaveActive:NO];
+        [self setCPULevel:0];
+    }
     %orig;
 }
+
 %end
 
 %ctor {
     NSString *processName = [NSProcessInfo processInfo].processName;
+    
     if ([processName isEqualToString:@"thermalmonitord"] || [processName isEqualToString:@"powerd"]) {
+        
         %init;
+        
         void *ioKitHandle = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW);
         if (ioKitHandle) {
             void *funcPtr = dlsym(ioKitHandle, "IORegistryEntrySetCFProperty");
-            if (funcPtr) MSHookFunction(funcPtr, (void *)hook_IORegistryEntrySetCFProperty, (void **)&orig_IORegistryEntrySetCFProperty);
+            if (funcPtr) {
+                MSHookFunction(funcPtr, (void *)hook_IORegistryEntrySetCFProperty, (void **)&orig_IORegistryEntrySetCFProperty);
+            }
         }
 
         dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0));
