@@ -10,40 +10,59 @@
 static const int InsulationUnrestrictedPowerTarget = 65000;
 static int gNotifyToken = -1;
 
-// 🟢 手动声明 C 接口，彻底告别编译报错
 typedef mach_port_t io_registry_entry_t;
 extern "C" kern_return_t IORegistryEntrySetCFProperty(io_registry_entry_t entry, CFStringRef propertyName, CFTypeRef property);
 
-// 👑 同步强读跨进程开关状态，0延迟
-static NSInteger getRealTimeMitigationMode() {
+// 👑 同步强读 64 位加密内核通信指令
+static uint64_t getRealTimeState() {
     if (gNotifyToken == -1) {
         notify_register_check(NOTIFY_CPU_MODE, &gNotifyToken);
     }
     uint64_t state = 0;
     notify_get_state(gNotifyToken, &state);
-    return (NSInteger)state;
+    return state;
 }
 
-// 👑 [绝杀机制]：C语言底层 IOKit 硬件拦截 (HoldCPU 纯正防反弹黑科技)
+// 提取 CPU 模式 (前8位)
+static NSInteger getRealTimeMitigationMode() {
+    return getRealTimeState() & 0xFF;
+}
+
+// 提取 是否拦截温控暗屏 (第9位)
+static BOOL getRealTimeBlockDimming() {
+    return (getRealTimeState() >> 8) & 1;
+}
+
+// 👑 [绝杀机制]：C语言底层 IOKit 硬件拦截
 static kern_return_t (*orig_IORegistryEntrySetCFProperty)(io_registry_entry_t, CFStringRef, CFTypeRef);
 
 static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry, CFStringRef propertyName, CFTypeRef property) {
     if (!propertyName) return orig_IORegistryEntrySetCFProperty(entry, propertyName, property);
 
     NSInteger mode = getRealTimeMitigationMode();
+    BOOL blockDimming = getRealTimeBlockDimming();
+    NSString *propStr = (__bridge NSString *)propertyName;
     
+    // 👑 彻底治愈“温控暗屏锁不住”！强行扔掉所有底层显示驱动的降亮指令
+    if (blockDimming) {
+        if ([propStr isEqualToString:@"max-brightness"] ||
+            [propStr isEqualToString:@"brightness-limit"] ||
+            [propStr isEqualToString:@"IOMFB_brightness_limit"] ||
+            [propStr isEqualToString:@"ThermalMitigation"] ||
+            [propStr isEqualToString:@"ThermalLimit"]) {
+            return KERN_SUCCESS; // 拦截并骗苹果底层已成功
+        }
+    }
+
     if (mode == 1) { 
-        // 模拟低频模式：拦截系统恢复频率的操作，死死按住 Level 2
-        NSString *propStr = (__bridge NSString *)propertyName;
+        // 模拟低频模式：死死按住 Level 2
         if ([propStr isEqualToString:@"p-state-cap"] || [propStr isEqualToString:@"CPU_Ceiling"] || [propStr isEqualToString:@"CPU_Floor"]) {
-            // 系统想满血？强制改为 Level 2 低频限制，并直接骗系统写入成功！
             orig_IORegistryEntrySetCFProperty(entry, propertyName, (__bridge CFTypeRef)@(2));
             return KERN_SUCCESS; 
         }
     } 
     else if (mode == 2) { 
-        // 满血防降频模式：拦截降频操作，强写为无限制
-        NSString *propStr = (__bridge NSString *)propertyName;
+        // 满血防降频模式：强写为无限制
         if ([propStr isEqualToString:@"p-state-cap"] || [propStr isEqualToString:@"CPU_Ceiling"]) {
             orig_IORegistryEntrySetCFProperty(entry, propertyName, (__bridge CFTypeRef)@(15));
             return KERN_SUCCESS; 
@@ -62,7 +81,6 @@ static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry
 - (void)updateCPU;
 @end
 
-// 👑 [温控双保险]
 %hook MitigationController
 
 - (void)setPowerSaveActive:(BOOL)active {
@@ -114,12 +132,11 @@ static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry
 %ctor {
     NSString *processName = [NSProcessInfo processInfo].processName;
     
-    // 镇压苹果底层的两大护法：温控监控和硬件电源总控
     if ([processName isEqualToString:@"thermalmonitord"] || [processName isEqualToString:@"powerd"]) {
         
         %init;
         
-        // 🚀 动态内存寻址 Hook，无视一切 SDK 报错！
+        // 🚀 动态内存寻址 Hook IOKit 硬件接口，控制暗屏与频率的命脉
         void *ioKitHandle = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW);
         if (ioKitHandle) {
             void *funcPtr = dlsym(ioKitHandle, "IORegistryEntrySetCFProperty");
@@ -128,7 +145,7 @@ static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry
             }
         }
 
-        // 底层高优先级守护定时器：强行持续心跳压制
+        // 底层守护强力心跳
         dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0));
         dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 1.0 * NSEC_PER_SEC), 1.0 * NSEC_PER_SEC, 0.1 * NSEC_PER_SEC);
         dispatch_source_set_event_handler(timer, ^{
