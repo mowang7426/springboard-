@@ -33,6 +33,11 @@ static BOOL getRealTimeBlockDimming() {
     return (getRealTimeState() >> 8) & 1;
 }
 
+// 🟢 提取 是否强制满血快充 (第10位)
+static BOOL getRealTimeForceFastCharge() {
+    return (getRealTimeState() >> 9) & 1;
+}
+
 // 👑 [绝杀机制]：C语言底层 IOKit 硬件拦截
 static kern_return_t (*orig_IORegistryEntrySetCFProperty)(io_registry_entry_t, CFStringRef, CFTypeRef);
 
@@ -41,6 +46,7 @@ static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry
 
     NSInteger mode = getRealTimeMitigationMode();
     BOOL blockDimming = getRealTimeBlockDimming();
+    BOOL forceFastCharge = getRealTimeForceFastCharge(); // 🟢
     NSString *propStr = (__bridge NSString *)propertyName;
     
     // 👑 彻底治愈“温控暗屏锁不住”！强行扔掉所有底层显示驱动的降亮指令
@@ -51,6 +57,19 @@ static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry
             [propStr isEqualToString:@"ThermalMitigation"] ||
             [propStr isEqualToString:@"ThermalLimit"]) {
             return KERN_SUCCESS; // 拦截并骗苹果底层已成功
+        }
+    }
+
+    // 🚀 【独家】强制满血快充机制：干掉系统针对电池发热的限流！
+    if (forceFastCharge) {
+        if ([propStr isEqualToString:@"MaxChargeCurrent"] ||
+            [propStr isEqualToString:@"NominalChargeCurrent"] ||
+            [propStr isEqualToString:@"ChargeCurrentLimit"] ||
+            [propStr isEqualToString:@"ChargeLimit"] ||
+            [propStr isEqualToString:@"ChargeRate"]) {
+            // 直接将 thermalmonitord (温控中心) 发给电池限制电流的指令扔掉
+            // 系统以为限流了，实际上电池硬件将一直按照原装线材的最大协议物理跑满
+            return KERN_SUCCESS;
         }
     }
 
