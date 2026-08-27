@@ -26,8 +26,7 @@
 #define kToggleNotification CFSTR("com.yourname.sbcpufloating.toggle")
 
 // 🟢 跨进程内核通信频道
-#define SBCPU_NOTIFY_MODE "com.yourname.sbcpufloating.cpumode"
-static int gModeNotifyToken = -1;
+#define NOTIFY_CPU_MODE "com.yourname.sbcpufloating.cpumode"
 
 #pragma mark - 1. QuartzCore 私有类及数据结构声明
 
@@ -55,7 +54,7 @@ typedef struct {
     NSInteger designBatteryCapacity;
 } DeviceSpec;
 
-#pragma mark - 2. 所有类的极严格前置声明
+#pragma mark - 2. 前置声明
 
 @interface SpringBoard : UIApplication
 - (UIInterfaceOrientation)activeInterfaceOrientation;
@@ -169,7 +168,7 @@ static CGFloat floatingAlpha = 0.70f;
 
 static BOOL keyboardAvoidEnable = YES;
 static BOOL smartDockEnable = YES;
-static NSInteger dockMode = 0; // 0: 自动, 1: 左侧, 2: 右侧, 3: 顶部, 4: 底部
+static NSInteger dockMode = 0;
 static BOOL rememberPositionEnable = YES;
 
 static BOOL showCpuFrequency = YES;
@@ -178,7 +177,7 @@ static BOOL force120HzEnable = NO;
 static BOOL thermalProtectionEnable = YES;       
 
 // 🌡️ Insulation 温控保护模块全局变量
-static NSInteger insulationCpuMode = 0;           // 0: 原生, 1: 模拟低电频率, 2: 防止温控降频
+static NSInteger insulationCpuMode = 0;           
 static BOOL insulationDimmingEnable = YES;        
 static BOOL insulationDisableThermometer = NO;    
 static BOOL insulationDisablePocketTemp = NO;     
@@ -243,15 +242,13 @@ static double getRealCPUFrequency(void);
 static void setHardwareChargingInhibit(BOOL inhibit);
 static NSString *getNetworkType(void);
 
-// 🟢 跨进程通知发送器 (由 SpringBoard 向 thermalmonitord 广播)
-static void SBCPUSetMitigationMode(NSInteger mode) {
-    insulationCpuMode = mode;
-    if (gModeNotifyToken == -1) {
-        notify_register_check(SBCPU_NOTIFY_MODE, &gModeNotifyToken);
-    }
-    if (gModeNotifyToken != -1) {
-        notify_set_state(gModeNotifyToken, (uint64_t)mode);
-        notify_post(SBCPU_NOTIFY_MODE);
+// 🟢 跨进程通知发送器 (由 SpringBoard 极速通知底层 thermalmonitord 干活，杜绝越权崩溃)
+static void SendCPUModeToDaemon(NSInteger mode) {
+    int token;
+    if (notify_register_check(NOTIFY_CPU_MODE, &token) == NOTIFY_STATUS_OK) {
+        notify_set_state(token, (uint64_t)mode);
+        notify_post(NOTIFY_CPU_MODE);
+        notify_cancel(token);
     }
 }
 
@@ -388,7 +385,7 @@ static void LoadPreferences(void) {
         }
         applySystemRefreshRate();
         
-        SBCPUSetMitigationMode(insulationCpuMode);
+        SendCPUModeToDaemon(insulationCpuMode);
     }
 }
 
@@ -441,7 +438,7 @@ static void SavePreferencesAndNotify(void) {
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), kPrefChangedNotification, NULL, NULL, YES);
     
     if ([[NSProcessInfo processInfo].processName isEqualToString:@"SpringBoard"]) {
-        SBCPUSetMitigationMode(insulationCpuMode);
+        SendCPUModeToDaemon(insulationCpuMode);
     }
 }
 
@@ -625,7 +622,6 @@ static double getRealCPUFrequency(void) {
     DeviceSpec spec = getDeviceSpec();
     double maxFreq = spec.maxFreqMHz > 0 ? spec.maxFreqMHz : 3468.0;
 
-    // 运行 250,000 次微指令循环
     uint64_t start = mach_absolute_time();
     volatile int count = 250000;
     while (count--) {
@@ -886,7 +882,6 @@ static void updateCPU(void) {
         double current = getBatteryCurrentInternal();
         BOOL charging = isChargingInternal();
 
-        // 🔌 智能温控断充核心逻辑
         if (smartChargeLimitEnable && temp > 0) {
             if (temp >= smartChargeLimitTemp && !isCurrentlyChargeInhibited) {
                 setHardwareChargingInhibit(YES);
@@ -2187,7 +2182,7 @@ static void applySystemRefreshRate(void) {
         return @"💡 功能说明：\n1. 强制 120Hz 高刷模式：通过底层硬件合成器与微像素渲染驱动，全局锁定 120Hz 满帧，彻底杜绝屏幕静止降频。\n2. 智能温控降频保护：开启时若检测到电池温度 ≥43°C 或系统过热警报将自动降频保护；关闭后解除温控限制，发热也强行保持 120Hz。";
     }
     if (section == 5) {
-        return @"💡 模式说明：\n1. 模拟低电频率：在温控守护进程与 IOKit 内核电源树中锁定 CPU Level 2，真正拉降整机硬件功耗与频率。\n2. 防止温控降频：无论发热多高均把 CPU 保持在 Level 0 满血状态，释放极限性能。";
+        return @"💡 模式说明：\n1. 模拟低电频率：在温控守护进程中锁定 CPU Level 2，真正拉降整机硬件功耗与频率。\n2. 防止温控降频：无论发热多高均把 CPU 保持在 Level 0 满血状态，释放极限性能。";
     }
     if (section == 6) {
         return @"💡 边充边玩黄金组合：开启高温智能断充后，一旦温度超过阈值，系统将物理切断电池充电改为直接由电源线供电（旁路供电）。配合 Insulation 防降频模块，可实现：大型游戏满帧不暗屏 + 电池不发热鼓包！";
@@ -2612,7 +2607,6 @@ static void registerV160Observers(void) {
 
 %ctor {
     %init;
-    
     NSString *processName = [NSProcessInfo processInfo].processName;
 
     if ([processName isEqualToString:@"SpringBoard"]) {
