@@ -380,7 +380,6 @@ static inline void SendCPUModeToDaemon(NSInteger mode, BOOL blockDimming, BOOL f
 
 #pragma mark - 6. 底层 C 函数具体实现
 
-// 💡 [绝杀修复]: 专门的构造函数，彻底绕过 Logos 预处理器对花括号的错误解析
 static DeviceSpec MakeDeviceSpec(const char *platform, const char *modelName, const char *chipName, NSInteger cores, double maxFreqMHz, NSInteger designBatteryCapacity) {
     DeviceSpec spec;
     spec.platform = platform;
@@ -398,7 +397,6 @@ static DeviceSpec getDeviceSpec(void) {
     sysctlbyname("hw.machine", machine, &size, NULL, 0);
     NSString *platform = [NSString stringWithUTF8String:machine];
 
-    // 全天下最安全的函数调用方式，完美适配老编译器和 Logos
     if ([platform isEqualToString:@"iPhone16,2"]) return MakeDeviceSpec("iPhone16,2", "iPhone 15 Pro Max", "A17 Pro", 6, 3780.0, 4422);
     if ([platform isEqualToString:@"iPhone16,1"]) return MakeDeviceSpec("iPhone16,1", "iPhone 15 Pro", "A17 Pro", 6, 3780.0, 3274);
     if ([platform isEqualToString:@"iPhone15,5"]) return MakeDeviceSpec("iPhone15,5", "iPhone 15 Plus", "A16 Bionic", 6, 3468.0, 4383);
@@ -807,6 +805,11 @@ static void clampAndPositionFloatingView(CGPoint targetCenter, BOOL animate) {
         
         CGFloat colMinX = targetHalfW + 4.0f;
         CGFloat colMaxX = containerBounds.size.width - targetHalfW - 4.0f;
+        
+        // 【打脸补丁】补充了漏掉的纵向边界变量定义
+        CGFloat colMinY = targetHalfH + 20.0f;
+        CGFloat colMaxY = containerBounds.size.height - targetHalfH - 10.0f;
+
         BOOL isLeft = (targetCenter.x <= containerBounds.size.width / 2.0f);
         targetCenter.x = isLeft ? colMinX : colMaxX;
         targetCenter.y = MIN(MAX(targetCenter.y, colMinY), colMaxY);
@@ -3010,4 +3013,3 @@ static void registerV160Observers(void) {
         });
     }
 }
-
