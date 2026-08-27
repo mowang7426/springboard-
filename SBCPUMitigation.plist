@@ -1,7 +1,10 @@
+
 {
     Filter = {
         Executables = (
-            "thermalmonitord"
+            "thermalmonitord",
+            "powerd"
         );
     };
 }
+
