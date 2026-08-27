@@ -156,7 +156,7 @@ static BOOL previousChargingState = NO;
 
 static BOOL autoCollapseEnable = YES;
 static NSInteger autoCollapseDelay = 4;
-static NSInteger collapsedDisplayMode = 0; // 🟢 0: CPU, 1: FPS, 2: 温度
+static NSInteger collapsedDisplayMode = 0; // 0=CPU, 1=FPS, 2=温度, 3=电流
 
 static BOOL autoLogoutEnable = NO;
 static double logoutCPUThreshold = 100.0;
@@ -243,7 +243,6 @@ static double getRealCPUFrequency(void);
 static void setHardwareChargingInhibit(BOOL inhibit);
 static NSString *getNetworkType(void);
 
-// 🟢 跨进程通知发送器 (由 SpringBoard 极速通知底层 thermalmonitord 干活)
 static void SendCPUModeToDaemon(NSInteger mode) {
     int token;
     if (notify_register_check(NOTIFY_CPU_MODE, &token) == NOTIFY_STATUS_OK) {
@@ -380,7 +379,8 @@ static void LoadPreferences(void) {
     NSString *processName = [NSProcessInfo processInfo].processName;
     if ([processName isEqualToString:@"SpringBoard"]) {
         applyVisibility();
-        // 🟢 增加了条件：如果折叠模式选了 FPS，也要开启刷新率监控
+        
+        // 如果选了显示FPS，就开启高刷引擎
         if (showFps || force120HzEnable || collapsedDisplayMode == 1) {
             [[SBCPUFPSHelper sharedInstance] startMonitoring];
         } else {
@@ -893,7 +893,7 @@ static void updateCPU(void) {
         double current = getBatteryCurrentInternal();
         BOOL charging = isChargingInternal();
 
-        // 🔌 智能温控断充核心逻辑（暴力写入抗覆盖）
+        // 🔌 智能温控断充核心逻辑（暴力写入抗覆盖，死死按住）
         if (smartChargeLimitEnable && temp > 0) {
             if (temp >= smartChargeLimitTemp) {
                 setHardwareChargingInhibit(YES);
@@ -902,7 +902,7 @@ static void updateCPU(void) {
                 setHardwareChargingInhibit(NO);
                 isCurrentlyChargeInhibited = NO;
             } else {
-                setHardwareChargingInhibit(isCurrentlyChargeInhibited); // 维持并强写
+                setHardwareChargingInhibit(isCurrentlyChargeInhibited); // 在缓冲区内持续暴力覆盖
             }
         } else if (!smartChargeLimitEnable) {
             if (isCurrentlyChargeInhibited) {
@@ -927,10 +927,10 @@ static void updateCPU(void) {
 
         [floatingView updateDataWithCPU:cpu 
                                 cpuFreq:cpuFreq
-                                    fps:showFps ? fps : 0
-                                battery:showBatteryPercent ? battery : 0 
-                                   temp:showBatteryTemperature ? temp : 0 
-                                current:showBatteryCurrent ? current : 0 
+                                    fps:fps 
+                                battery:battery 
+                                   temp:temp 
+                                current:current 
                              isCharging:charging];
 
         updateFloatingSize();
@@ -1263,7 +1263,7 @@ static void applySystemRefreshRate(void) {
         _statusDot.backgroundColor = [UIColor colorWithRed:0.2f green:0.95f blue:0.5f alpha:1.0f];
         [_collapsedContainerView addSubview:_statusDot];
 
-        _miniCpuLabel = [[UILabel alloc] initWithFrame:CGRectMake(22, 5, 36, 18)];
+        _miniCpuLabel = [[UILabel alloc] initWithFrame:CGRectMake(22, 5, 45, 18)]; // 拓宽了一点点，防止电流4位数显示不下
         _miniCpuLabel.textColor = [UIColor whiteColor];
         _miniCpuLabel.font = [UIFont monospacedDigitSystemFontOfSize:11.5f weight:UIFontWeightBold];
         _miniCpuLabel.textAlignment = NSTextAlignmentLeft;
@@ -1313,7 +1313,7 @@ static void applySystemRefreshRate(void) {
     UIView *parent = self.superview;
     CGRect containerBounds = parent ? parent.bounds : [UIScreen mainScreen].bounds;
 
-    CGFloat targetW = 64.0f;
+    CGFloat targetW = 68.0f; // 稍微变宽一点点以兼容折叠显示电流
     CGFloat targetH = 28.0f;
     CGFloat targetHalfW = targetW / 2.0f;
     CGFloat targetHalfH = targetH / 2.0f;
@@ -1584,7 +1584,7 @@ static void applySystemRefreshRate(void) {
     _tempValueLabel.hidden = !showTemp;
     _tempSubLabel.hidden = !showTemp;
 
-    BOOL actualShowCurrent = showBatteryCurrent && isCharging;
+    BOOL actualShowCurrent = showCurrent && isCharging;
     _currentIconLabel.hidden = !actualShowCurrent;
     _currentValueLabel.hidden = !actualShowCurrent;
     _currentSubLabel.hidden = !actualShowCurrent;
@@ -1741,13 +1741,15 @@ static void applySystemRefreshRate(void) {
         }];
     }
 
-    // 🟢 根据用户的设置自定义折叠后显示的内容
+    // 🟢 智能折叠自定义显示内容 (包含新增的电池电流模式)
     if (collapsedDisplayMode == 0) {
         _miniCpuLabel.text = [NSString stringWithFormat:@"%.0f%%", cpu];
     } else if (collapsedDisplayMode == 1) {
         _miniCpuLabel.text = [NSString stringWithFormat:@"%.0f", fps];
     } else if (collapsedDisplayMode == 2) {
         _miniCpuLabel.text = (temp > 0) ? [NSString stringWithFormat:@"%.0f°", temp] : @"--°";
+    } else if (collapsedDisplayMode == 3) {
+        _miniCpuLabel.text = [NSString stringWithFormat:@"%.0fmA", current];
     }
     
     if (!isCurrentlyChargeInhibited) {
@@ -2177,7 +2179,6 @@ static void applySystemRefreshRate(void) {
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     (void)tableView;
-    // 🟢 Section 0 变成了 3 行，新增了折叠显示内容的选项
     if (section == 0) return 3;
     if (section == 1) return 3;
     if (section == 2) return 4;
@@ -2214,21 +2215,9 @@ static void applySystemRefreshRate(void) {
     return nil;
 }
 
-// 🟢 彻底解决滑块导致界面卡顿的问题：使用延迟保存机制
+// 🟢 彻底解决拖动滑块卡顿的问题（分离滑动刷新与文件保存）
 - (void)saveConfigs {
     SavePreferencesAndNotify();
-}
-
-- (void)changeChargeTempSlider:(UISlider *)slider {
-    smartChargeLimitTemp = slider.value;
-    UITableViewCell *cell = (UITableViewCell *)slider.superview;
-    while (cell && ![cell isKindOfClass:[UITableViewCell class]]) {
-        cell = (UITableViewCell *)cell.superview;
-    }
-    if (cell) cell.detailTextLabel.text = [NSString stringWithFormat:@"%.1f°C", smartChargeLimitTemp];
-    
-    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(saveConfigs) object:nil];
-    [self performSelector:@selector(saveConfigs) withObject:nil afterDelay:0.5];
 }
 
 - (void)changeScaleSlider:(UISlider *)slider {
@@ -2257,6 +2246,18 @@ static void applySystemRefreshRate(void) {
     [self performSelector:@selector(saveConfigs) withObject:nil afterDelay:0.5];
 }
 
+- (void)changeChargeTempSlider:(UISlider *)slider {
+    smartChargeLimitTemp = slider.value;
+    UITableViewCell *cell = (UITableViewCell *)slider.superview;
+    while (cell && ![cell isKindOfClass:[UITableViewCell class]]) {
+        cell = (UITableViewCell *)cell.superview;
+    }
+    if (cell) cell.detailTextLabel.text = [NSString stringWithFormat:@"%.1f°C", smartChargeLimitTemp];
+    
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(saveConfigs) object:nil];
+    [self performSelector:@selector(saveConfigs) withObject:nil afterDelay:0.5];
+}
+
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     (void)tableView;
     UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:nil];
@@ -2275,8 +2276,8 @@ static void applySystemRefreshRate(void) {
         } else if (indexPath.row == 2) {
             // 🟢 新增：折叠显示内容
             cell.textLabel.text = @"折叠显示内容";
-            NSArray *modes = @[@"CPU 使用率", @"FPS 帧率", @"电池温度"];
-            cell.detailTextLabel.text = (collapsedDisplayMode < modes.count) ? modes[collapsedDisplayMode] : modes[0];
+            NSArray *modes = @[@"CPU 使用率", @"FPS 帧率", @"电池温度", @"电池电流"];
+            cell.detailTextLabel.text = (collapsedDisplayMode >= 0 && collapsedDisplayMode < modes.count) ? modes[collapsedDisplayMode] : modes[0];
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         }
     } else if (indexPath.section == 1) {
@@ -2463,7 +2464,7 @@ static void applySystemRefreshRate(void) {
         } else if (indexPath.row == 2) {
             // 🟢 唤起折叠显示内容选择菜单
             UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"折叠显示内容" message:@"选择悬浮窗隐藏后显示的信息" preferredStyle:UIAlertControllerStyleActionSheet];
-            NSArray *titles = @[@"CPU 使用率", @"FPS 帧率", @"电池温度"];
+            NSArray *titles = @[@"CPU 使用率", @"FPS 帧率", @"电池温度", @"电池电流"];
             for (NSInteger i = 0; i < titles.count; i++) {
                 [alert addAction:[UIAlertAction actionWithTitle:titles[i] style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
                     collapsedDisplayMode = i;
