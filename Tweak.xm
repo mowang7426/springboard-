@@ -177,14 +177,12 @@ static BOOL showFps = YES;
 static BOOL force120HzEnable = NO;               
 static BOOL thermalProtectionEnable = YES;       
 
-// 🌡️ Insulation 温控保护模块全局变量
 static NSInteger insulationCpuMode = 0;           
 static BOOL insulationDimmingEnable = YES;        
 static BOOL insulationDisableThermometer = NO;    
 static BOOL insulationDisablePocketTemp = NO;     
 static BOOL insulationLockSunlight = NO;          
 
-// 🔌 智能温控断充 全局变量
 static BOOL smartChargeLimitEnable = NO;
 static float smartChargeLimitTemp = 38.0f;
 static BOOL isCurrentlyChargeInhibited = NO;      
@@ -206,7 +204,6 @@ static CFAbsoluteTime lastNetSpeedTime = 0;
 
 static host_cpu_load_info_data_t prev_cpu_load;
 static BOOL has_prev_cpu_load = NO;
-
 
 #pragma mark - 4. 所有的底层 C 函数前置声明
 
@@ -380,7 +377,6 @@ static void LoadPreferences(void) {
     if ([processName isEqualToString:@"SpringBoard"]) {
         applyVisibility();
         
-        // 如果选了显示FPS，就开启高刷引擎
         if (showFps || force120HzEnable || collapsedDisplayMode == 1) {
             [[SBCPUFPSHelper sharedInstance] startMonitoring];
         } else {
@@ -453,7 +449,6 @@ static void setHardwareChargingInhibit(BOOL inhibit) {
         IORegistryEntrySetCFProperty(service, CFSTR("ChargeInhibit"), inhibit ? kCFBooleanTrue : kCFBooleanFalse);
         IOObjectRelease(service);
     }
-    // AppleDialogPMU 是 iPhone 12/13/14+ 机型更新后的充电驱动核心
     io_service_t pmuService = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleDialogPMU"));
     if (pmuService) {
         IORegistryEntrySetCFProperty(pmuService, CFSTR("ChargeInhibit"), inhibit ? kCFBooleanTrue : kCFBooleanFalse);
@@ -690,9 +685,21 @@ static void clampAndPositionFloatingView(CGPoint targetCenter, BOOL animate) {
     if (maxX < minX) minX = maxX = containerBounds.size.width / 2.0f;
     if (maxY < minY) minY = maxY = containerBounds.size.height / 2.0f;
 
+    // 🟢 精确处理折叠状态的边界计算，使得拖动体验极度完美
     if (floatingView.isCollapsed) {
+        CGFloat targetW = 68.0f;
+        CGFloat targetH = 28.0f;
+        CGFloat targetHalfW = targetW / 2.0f;
+        CGFloat targetHalfH = targetH / 2.0f;
+        
+        CGFloat colMinX = targetHalfW + 4.0f;
+        CGFloat colMaxX = containerBounds.size.width - targetHalfW - 4.0f;
         BOOL isLeft = (targetCenter.x <= containerBounds.size.width / 2.0f);
-        targetCenter.x = isLeft ? minX : maxX;
+        targetCenter.x = isLeft ? colMinX : colMaxX;
+
+        CGFloat colMinY = targetHalfH + 20.0f;
+        CGFloat colMaxY = containerBounds.size.height - targetHalfH - 10.0f;
+        targetCenter.y = MIN(MAX(targetCenter.y, colMinY), colMaxY);
     } else if (smartDockEnable) {
         if (dockMode == 1) { // 左侧
             targetCenter.x = minX;
@@ -718,10 +725,12 @@ static void clampAndPositionFloatingView(CGPoint targetCenter, BOOL animate) {
         }
     }
 
-    if (targetCenter.x < minX) targetCenter.x = minX;
-    if (targetCenter.x > maxX) targetCenter.x = maxX;
-    if (targetCenter.y < minY) targetCenter.y = minY;
-    if (targetCenter.y > maxY) targetCenter.y = maxY;
+    if (!floatingView.isCollapsed) {
+        if (targetCenter.x < minX) targetCenter.x = minX;
+        if (targetCenter.x > maxX) targetCenter.x = maxX;
+        if (targetCenter.y < minY) targetCenter.y = minY;
+        if (targetCenter.y > maxY) targetCenter.y = maxY;
+    }
 
     void (^layoutBlock)(void) = ^{ floatingView.center = targetCenter; };
 
@@ -893,7 +902,7 @@ static void updateCPU(void) {
         double current = getBatteryCurrentInternal();
         BOOL charging = isChargingInternal();
 
-        // 🔌 智能温控断充核心逻辑（暴力写入抗覆盖，死死按住）
+        // 🔌 智能温控断充核心逻辑（暴力写入抗覆盖）
         if (smartChargeLimitEnable && temp > 0) {
             if (temp >= smartChargeLimitTemp) {
                 setHardwareChargingInhibit(YES);
@@ -902,7 +911,7 @@ static void updateCPU(void) {
                 setHardwareChargingInhibit(NO);
                 isCurrentlyChargeInhibited = NO;
             } else {
-                setHardwareChargingInhibit(isCurrentlyChargeInhibited); // 在缓冲区内持续暴力覆盖
+                setHardwareChargingInhibit(isCurrentlyChargeInhibited); 
             }
         } else if (!smartChargeLimitEnable) {
             if (isCurrentlyChargeInhibited) {
@@ -1263,7 +1272,7 @@ static void applySystemRefreshRate(void) {
         _statusDot.backgroundColor = [UIColor colorWithRed:0.2f green:0.95f blue:0.5f alpha:1.0f];
         [_collapsedContainerView addSubview:_statusDot];
 
-        _miniCpuLabel = [[UILabel alloc] initWithFrame:CGRectMake(22, 5, 45, 18)]; // 拓宽了一点点，防止电流4位数显示不下
+        _miniCpuLabel = [[UILabel alloc] initWithFrame:CGRectMake(22, 5, 45, 18)]; // 拓宽防遮挡
         _miniCpuLabel.textColor = [UIColor whiteColor];
         _miniCpuLabel.font = [UIFont monospacedDigitSystemFontOfSize:11.5f weight:UIFontWeightBold];
         _miniCpuLabel.textAlignment = NSTextAlignmentLeft;
@@ -1313,7 +1322,7 @@ static void applySystemRefreshRate(void) {
     UIView *parent = self.superview;
     CGRect containerBounds = parent ? parent.bounds : [UIScreen mainScreen].bounds;
 
-    CGFloat targetW = 68.0f; // 稍微变宽一点点以兼容折叠显示电流
+    CGFloat targetW = 68.0f;
     CGFloat targetH = 28.0f;
     CGFloat targetHalfW = targetW / 2.0f;
     CGFloat targetHalfH = targetH / 2.0f;
@@ -1502,8 +1511,9 @@ static void applySystemRefreshRate(void) {
 - (void)handlePan:(UIPanGestureRecognizer *)pan {
     [self resetInactivityTimer];
 
+    // 🟢 彻底修复拖动瞬间展开的体验问题：拖动时保持原有状态！
     if (pan.state == UIGestureRecognizerStateBegan) {
-        if (_isCollapsed) [self expandFromEdgeAnimated:NO];
+        // [原先这里的展开逻辑被删除了]
         self.lastPoint = self.center;
     } else if (pan.state == UIGestureRecognizerStateChanged) {
         CGPoint translation = [pan translationInView:self.superview];
@@ -1584,7 +1594,7 @@ static void applySystemRefreshRate(void) {
     _tempValueLabel.hidden = !showTemp;
     _tempSubLabel.hidden = !showTemp;
 
-    BOOL actualShowCurrent = showCurrent && isCharging;
+    BOOL actualShowCurrent = showBatteryCurrent && isCharging;
     _currentIconLabel.hidden = !actualShowCurrent;
     _currentValueLabel.hidden = !actualShowCurrent;
     _currentSubLabel.hidden = !actualShowCurrent;
@@ -1741,7 +1751,7 @@ static void applySystemRefreshRate(void) {
         }];
     }
 
-    // 🟢 智能折叠自定义显示内容 (包含新增的电池电流模式)
+    // 🟢 智能折叠自定义显示内容
     if (collapsedDisplayMode == 0) {
         _miniCpuLabel.text = [NSString stringWithFormat:@"%.0f%%", cpu];
     } else if (collapsedDisplayMode == 1) {
@@ -2215,49 +2225,6 @@ static void applySystemRefreshRate(void) {
     return nil;
 }
 
-// 🟢 彻底解决拖动滑块卡顿的问题（分离滑动刷新与文件保存）
-- (void)saveConfigs {
-    SavePreferencesAndNotify();
-}
-
-- (void)changeScaleSlider:(UISlider *)slider {
-    floatingScale = slider.value;
-    UITableViewCell *cell = (UITableViewCell *)slider.superview;
-    while (cell && ![cell isKindOfClass:[UITableViewCell class]]) {
-        cell = (UITableViewCell *)cell.superview;
-    }
-    if (cell) cell.detailTextLabel.text = [NSString stringWithFormat:@"%.0f%%", floatingScale * 100];
-    
-    updateFloatingSize();
-    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(saveConfigs) object:nil];
-    [self performSelector:@selector(saveConfigs) withObject:nil afterDelay:0.5];
-}
-
-- (void)changeFontSlider:(UISlider *)slider {
-    floatingFontSize = slider.value;
-    UITableViewCell *cell = (UITableViewCell *)slider.superview;
-    while (cell && ![cell isKindOfClass:[UITableViewCell class]]) {
-        cell = (UITableViewCell *)cell.superview;
-    }
-    if (cell) cell.detailTextLabel.text = [NSString stringWithFormat:@"%.0fpt", floatingFontSize];
-    
-    updateFloatingSize();
-    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(saveConfigs) object:nil];
-    [self performSelector:@selector(saveConfigs) withObject:nil afterDelay:0.5];
-}
-
-- (void)changeChargeTempSlider:(UISlider *)slider {
-    smartChargeLimitTemp = slider.value;
-    UITableViewCell *cell = (UITableViewCell *)slider.superview;
-    while (cell && ![cell isKindOfClass:[UITableViewCell class]]) {
-        cell = (UITableViewCell *)cell.superview;
-    }
-    if (cell) cell.detailTextLabel.text = [NSString stringWithFormat:@"%.1f°C", smartChargeLimitTemp];
-    
-    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(saveConfigs) object:nil];
-    [self performSelector:@selector(saveConfigs) withObject:nil afterDelay:0.5];
-}
-
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     (void)tableView;
     UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:nil];
@@ -2274,7 +2241,7 @@ static void applySystemRefreshRate(void) {
             cell.detailTextLabel.text = [NSString stringWithFormat:@"%ld 秒", (long)autoCollapseDelay];
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         } else if (indexPath.row == 2) {
-            // 🟢 新增：折叠显示内容
+            // 🟢 菜单选择：折叠显示内容
             cell.textLabel.text = @"折叠显示内容";
             NSArray *modes = @[@"CPU 使用率", @"FPS 帧率", @"电池温度", @"电池电流"];
             cell.detailTextLabel.text = (collapsedDisplayMode >= 0 && collapsedDisplayMode < modes.count) ? modes[collapsedDisplayMode] : modes[0];
@@ -2304,6 +2271,7 @@ static void applySystemRefreshRate(void) {
             [sw addTarget:self action:@selector(changeAlphaEnable:) forControlEvents:UIControlEventValueChanged];
             cell.accessoryView = sw;
         } else if (indexPath.row == 1) {
+            // 🟢 菜单选择：透明度
             cell.textLabel.text = @"透明度";
             cell.detailTextLabel.text = [NSString stringWithFormat:@"%.0f%%", floatingAlpha * 100.0];
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
@@ -2336,6 +2304,7 @@ static void applySystemRefreshRate(void) {
             [sw addTarget:self action:@selector(changeSmartDock:) forControlEvents:UIControlEventValueChanged];
             cell.accessoryView = sw;
         } else if (indexPath.row == 2) {
+            // 🟢 菜单选择：吸附模式
             cell.textLabel.text = @"吸附模式";
             NSArray *modes = @[@"自动", @"左侧", @"右侧", @"顶部", @"底部"];
             cell.detailTextLabel.text = (dockMode >= 0 && dockMode < modes.count) ? modes[dockMode] : @"自动";
@@ -2357,6 +2326,7 @@ static void applySystemRefreshRate(void) {
         }
     } else if (indexPath.section == 5) {
         if (indexPath.row == 0) {
+            // 🟢 菜单选择：CPU 模式
             cell.textLabel.text = @"CPU 模式";
             NSArray *modes = @[@"苹果原生温控", @"模拟低电频率", @"防止温控降频"];
             cell.detailTextLabel.text = (insulationCpuMode >= 0 && insulationCpuMode < modes.count) ? modes[insulationCpuMode] : modes[0];
@@ -2394,11 +2364,10 @@ static void applySystemRefreshRate(void) {
             [sw addTarget:self action:@selector(changeSmartChargeLimit:) forControlEvents:UIControlEventValueChanged];
             cell.accessoryView = sw;
         } else if (indexPath.row == 1) {
+            // 🟢 彻底废除卡顿滑块，改为菜单选择
             cell.textLabel.text = @"断充温度阈值";
-            UISlider *slider = [[UISlider alloc] initWithFrame:CGRectMake(0,0,130,30)];
-            slider.minimumValue = 30.0; slider.maximumValue = 45.0; slider.value = smartChargeLimitTemp;
-            [slider addTarget:self action:@selector(changeChargeTempSlider:) forControlEvents:UIControlEventValueChanged];
             cell.detailTextLabel.text = [NSString stringWithFormat:@"%.1f°C", smartChargeLimitTemp];
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         }
     } else if (indexPath.section == 7) {
         if (indexPath.row == 0) {
@@ -2442,6 +2411,7 @@ static void applySystemRefreshRate(void) {
     return cell;
 }
 
+// 🟢 解决滑动卡顿和响应所有列表点击事件
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
 
@@ -2453,7 +2423,6 @@ static void applySystemRefreshRate(void) {
 
             for (NSInteger i = 0; i < titles.count; i++) {
                 [alert addAction:[UIAlertAction actionWithTitle:titles[i] style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-                    (void)action;
                     autoCollapseDelay = [values[i] integerValue];
                     SavePreferencesAndNotify();
                     [self.tableView reloadData];
@@ -2462,7 +2431,6 @@ static void applySystemRefreshRate(void) {
             [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
             [self presentViewController:alert animated:YES completion:nil];
         } else if (indexPath.row == 2) {
-            // 🟢 唤起折叠显示内容选择菜单
             UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"折叠显示内容" message:@"选择悬浮窗隐藏后显示的信息" preferredStyle:UIAlertControllerStyleActionSheet];
             NSArray *titles = @[@"CPU 使用率", @"FPS 帧率", @"电池温度", @"电池电流"];
             for (NSInteger i = 0; i < titles.count; i++) {
@@ -2491,7 +2459,6 @@ static void applySystemRefreshRate(void) {
 
             for (NSInteger i = 0; i < titles.count; i++) {
                 [alert addAction:[UIAlertAction actionWithTitle:titles[i] style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-                    (void)action;
                     floatingAlpha = [values[i] floatValue];
                     SavePreferencesAndNotify();
                     applyFloatingAlpha();
@@ -2503,10 +2470,17 @@ static void applySystemRefreshRate(void) {
         }
     } else if (indexPath.section == 3) {
         if (indexPath.row == 2) {
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"吸附模式" message:@"选择悬浮窗贴边时的吸附位置" preferredStyle:UIAlertControllerStyleActionSheet];
             NSArray *modes = @[@"自动", @"左侧", @"右侧", @"顶部", @"底部"];
-            dockMode = (dockMode + 1) % modes.count;
-            SavePreferencesAndNotify();
-            [tableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationNone];
+            for (NSInteger i = 0; i < modes.count; i++) {
+                [alert addAction:[UIAlertAction actionWithTitle:modes[i] style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+                    dockMode = i;
+                    SavePreferencesAndNotify();
+                    [self.tableView reloadData];
+                }]];
+            }
+            [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+            [self presentViewController:alert animated:YES completion:nil];
         }
     } else if (indexPath.section == 5) {
         if (indexPath.row == 0) {
@@ -2522,7 +2496,51 @@ static void applySystemRefreshRate(void) {
             [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
             [self presentViewController:alert animated:YES completion:nil];
         }
+    } else if (indexPath.section == 6) {
+        if (indexPath.row == 1) {
+            // 🟢 断充温度改用弹窗点击选择，彻底告别滑块卡顿！
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"断充温度阈值" message:@"选择电池达到多少度时强制旁路供电" preferredStyle:UIAlertControllerStyleActionSheet];
+            NSArray *titles = @[@"35.0°C", @"36.0°C", @"37.0°C", @"38.0°C", @"39.0°C", @"40.0°C", @"41.0°C", @"42.0°C", @"43.0°C"];
+            NSArray *values = @[@35.0, @36.0, @37.0, @38.0, @39.0, @40.0, @41.0, @42.0, @43.0];
+            
+            for (NSInteger i = 0; i < titles.count; i++) {
+                [alert addAction:[UIAlertAction actionWithTitle:titles[i] style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+                    smartChargeLimitTemp = [values[i] floatValue];
+                    SavePreferencesAndNotify();
+                    [self.tableView reloadData];
+                }]];
+            }
+            [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+            [self presentViewController:alert animated:YES completion:nil];
+        }
     }
+}
+
+// 🟢 剩下保留的只有大小和字体这两个非核心滑块，采用延迟保存防卡顿
+- (void)saveConfigs {
+    SavePreferencesAndNotify();
+}
+
+- (void)changeScaleSlider:(UISlider *)slider {
+    floatingScale = slider.value;
+    UITableViewCell *cell = (UITableViewCell *)slider.superview;
+    while (cell && ![cell isKindOfClass:[UITableViewCell class]]) cell = (UITableViewCell *)cell.superview;
+    if (cell) cell.detailTextLabel.text = [NSString stringWithFormat:@"%.0f%%", floatingScale * 100];
+    
+    updateFloatingSize();
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(saveConfigs) object:nil];
+    [self performSelector:@selector(saveConfigs) withObject:nil afterDelay:0.5];
+}
+
+- (void)changeFontSlider:(UISlider *)slider {
+    floatingFontSize = slider.value;
+    UITableViewCell *cell = (UITableViewCell *)slider.superview;
+    while (cell && ![cell isKindOfClass:[UITableViewCell class]]) cell = (UITableViewCell *)cell.superview;
+    if (cell) cell.detailTextLabel.text = [NSString stringWithFormat:@"%.0fpt", floatingFontSize];
+    
+    updateFloatingSize();
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(saveConfigs) object:nil];
+    [self performSelector:@selector(saveConfigs) withObject:nil afterDelay:0.5];
 }
 
 - (void)changeAutoCollapse:(UISwitch *)sw {
