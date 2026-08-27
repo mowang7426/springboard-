@@ -156,9 +156,7 @@ static BOOL previousChargingState = NO;
 
 static BOOL autoCollapseEnable = YES;
 static NSInteger autoCollapseDelay = 4;
-static NSInteger collapsedDisplayMode = 0; // 0=CPU, 1=FPS, 2=温度, 3=电流
-
-// 🟢 横屏游戏自动展开开关
+static NSInteger collapsedDisplayMode = 0; 
 static BOOL autoExpandLandscape = YES;
 
 static BOOL autoLogoutEnable = NO;
@@ -180,11 +178,12 @@ static BOOL showFps = YES;
 static BOOL force120HzEnable = NO;               
 static BOOL thermalProtectionEnable = YES;       
 
+// 👑 新版拦截状态
 static NSInteger insulationCpuMode = 0;           
-static BOOL insulationDimmingEnable = YES;        
-static BOOL insulationDisableThermometer = NO;    
-static BOOL insulationDisablePocketTemp = NO;     
-static BOOL insulationLockSunlight = NO;          
+static BOOL blockThermalDimming = YES;        // 拦截温控暗屏
+static BOOL blockThermalAlert = YES;          // 拦截温度计弹窗
+static BOOL blockPocketTemp = YES;            // 拦截口袋高温
+static BOOL forceSunlightHBM = NO;            // 拦截阳光限制
 
 static BOOL smartChargeLimitEnable = NO;
 static float smartChargeLimitTemp = 38.0f;
@@ -243,10 +242,13 @@ static double getRealCPUFrequency(double currentCpuUsage);
 static void setHardwareChargingInhibit(BOOL inhibit);
 static NSString *getNetworkType(void);
 
-static void SendCPUModeToDaemon(NSInteger mode) {
+// 👑 跨进程内核通信 (Bit-packing 核心)
+static void SendCPUModeToDaemon(NSInteger mode, BOOL blockDimming) {
     int token;
     if (notify_register_check(NOTIFY_CPU_MODE, &token) == NOTIFY_STATUS_OK) {
-        notify_set_state(token, (uint64_t)mode);
+        // 使用 64 位整型承载多组布尔指令，突破单通频道的限制！
+        uint64_t state = (mode & 0xFF) | ((blockDimming ? 1ULL : 0) << 8);
+        notify_set_state(token, state);
         notify_post(NOTIFY_CPU_MODE);
         notify_cancel(token);
     }
@@ -362,10 +364,11 @@ static void LoadPreferences(void) {
     showBatteryCurrent = getBoolPref(CFSTR("showBatteryCurrent"), YES);
 
     insulationCpuMode = getIntPref(CFSTR("insulationCpuMode"), 0);
-    insulationDimmingEnable = getBoolPref(CFSTR("insulationDimmingEnable"), YES);
-    insulationDisableThermometer = getBoolPref(CFSTR("insulationDisableThermometer"), NO);
-    insulationDisablePocketTemp = getBoolPref(CFSTR("insulationDisablePocketTemp"), NO);
-    insulationLockSunlight = getBoolPref(CFSTR("insulationLockSunlight"), NO);
+    // 👑 自动兼容读取旧版用户的设置，但应用新的拦截逻辑
+    blockThermalDimming = getBoolPref(CFSTR("blockThermalDimming"), YES);
+    blockThermalAlert = getBoolPref(CFSTR("blockThermalAlert"), YES);
+    blockPocketTemp = getBoolPref(CFSTR("blockPocketTemp"), YES);
+    forceSunlightHBM = getBoolPref(CFSTR("forceSunlightHBM"), NO);
 
     smartChargeLimitEnable = getBoolPref(CFSTR("smartChargeLimitEnable"), NO);
     smartChargeLimitTemp = getFloatPref(CFSTR("smartChargeLimitTemp"), 38.0f);
@@ -381,7 +384,8 @@ static void LoadPreferences(void) {
         }
         applySystemRefreshRate();
         
-        SendCPUModeToDaemon(insulationCpuMode);
+        // 发送加密参数给底层
+        SendCPUModeToDaemon(insulationCpuMode, blockThermalDimming);
     }
 }
 
@@ -416,10 +420,10 @@ static void SavePreferencesAndNotify(void) {
     setBoolPref(CFSTR("showBatteryCurrent"), showBatteryCurrent);
 
     setIntPref(CFSTR("insulationCpuMode"), insulationCpuMode);
-    setBoolPref(CFSTR("insulationDimmingEnable"), insulationDimmingEnable);
-    setBoolPref(CFSTR("insulationDisableThermometer"), insulationDisableThermometer);
-    setBoolPref(CFSTR("insulationDisablePocketTemp"), insulationDisablePocketTemp);
-    setBoolPref(CFSTR("insulationLockSunlight"), insulationLockSunlight);
+    setBoolPref(CFSTR("blockThermalDimming"), blockThermalDimming);
+    setBoolPref(CFSTR("blockThermalAlert"), blockThermalAlert);
+    setBoolPref(CFSTR("blockPocketTemp"), blockPocketTemp);
+    setBoolPref(CFSTR("forceSunlightHBM"), forceSunlightHBM);
 
     setBoolPref(CFSTR("smartChargeLimitEnable"), smartChargeLimitEnable);
     setFloatPref(CFSTR("smartChargeLimitTemp"), smartChargeLimitTemp);
@@ -436,7 +440,7 @@ static void SavePreferencesAndNotify(void) {
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), kPrefChangedNotification, NULL, NULL, YES);
     
     if ([[NSProcessInfo processInfo].processName isEqualToString:@"SpringBoard"]) {
-        SendCPUModeToDaemon(insulationCpuMode);
+        SendCPUModeToDaemon(insulationCpuMode, blockThermalDimming);
     }
 }
 
@@ -609,7 +613,6 @@ static UIInterfaceOrientation getActiveInterfaceOrientation(void) {
     return scene ? scene.interfaceOrientation : UIInterfaceOrientationPortrait;
 }
 
-// 👑 [避让灵动岛与横屏自适应]
 static void clampAndPositionFloatingView(CGPoint targetCenter, BOOL animate) {
     if (!floatingView || !floatingView.superview) return;
 
@@ -674,7 +677,6 @@ static void clampAndPositionFloatingView(CGPoint targetCenter, BOOL animate) {
         if (targetCenter.y > maxY) targetCenter.y = maxY;
     }
 
-    // 👑 自动避让灵动岛
     if (containerBounds.size.height > containerBounds.size.width && containerBounds.size.height > 800) {
         if (targetCenter.y - halfH < 54.0) { 
             if (targetCenter.x + halfW > containerBounds.size.width / 2.0 - 75.0 &&
@@ -723,11 +725,33 @@ static void updateFloatingSize(void) {
     }
 
     CGFloat rotationAngle = 0.0;
+    BOOL isLandscape = NO;
     switch (orientation) {
-        case UIInterfaceOrientationLandscapeLeft: rotationAngle = -M_PI_2; break;
-        case UIInterfaceOrientationLandscapeRight: rotationAngle = M_PI_2; break;
-        case UIInterfaceOrientationPortraitUpsideDown: rotationAngle = M_PI; break;
-        case UIInterfaceOrientationPortrait: default: rotationAngle = 0.0; break;
+        case UIInterfaceOrientationLandscapeLeft: 
+            rotationAngle = -M_PI_2; 
+            isLandscape = YES;
+            break;
+        case UIInterfaceOrientationLandscapeRight: 
+            rotationAngle = M_PI_2; 
+            isLandscape = YES;
+            break;
+        case UIInterfaceOrientationPortraitUpsideDown: 
+            rotationAngle = M_PI; 
+            break;
+        case UIInterfaceOrientationPortrait: 
+        default: 
+            rotationAngle = 0.0; 
+            break;
+    }
+
+    if (autoExpandLandscape) {
+        if (isLandscape) {
+            if (floatingView.isCollapsed) {
+                [floatingView expandFromEdgeAnimated:YES];
+            }
+        } else {
+            [floatingView resetInactivityTimer];
+        }
     }
 
     CGAffineTransform finalTransform = CGAffineTransformConcat(CGAffineTransformMakeScale(floatingScale, floatingScale), CGAffineTransformMakeRotation(rotationAngle));
@@ -879,15 +903,12 @@ static void updateCPU(void) {
         }
         previousChargingState = charging;
 
-        // 👑 [终极心跳检测修复]：每秒判断，确保横竖屏切换时绝不死锁！
         if (autoExpandLandscape) {
             UIInterfaceOrientation orientation = getActiveInterfaceOrientation();
             BOOL isLandscape = (orientation == UIInterfaceOrientationLandscapeLeft || orientation == UIInterfaceOrientationLandscapeRight);
             if (isLandscape && floatingView.isCollapsed) {
-                // 如果检测到是横屏，且它还折叠着，强制把它拉开！
                 [floatingView expandFromEdgeAnimated:YES];
             } else if (!isLandscape && !floatingView.isCollapsed && floatingView.inactivityTimer == nil) {
-                // 如果检测到回到了竖屏，且它是展开的、并且定时器没启动，重新激活折叠倒计时！
                 [floatingView resetInactivityTimer];
             }
         }
@@ -1265,7 +1286,6 @@ static void applySystemRefreshRate(void) {
         _inactivityTimer = nil;
     }
     if (autoCollapseEnable && !_isCollapsed && !settingsShowing && !detailShowing) {
-        // 👑 如果是横屏且开了“横屏自动展开”，绝对不启动折叠定时器！
         if (autoExpandLandscape) {
             UIInterfaceOrientation orientation = getActiveInterfaceOrientation();
             BOOL isLandscape = (orientation == UIInterfaceOrientationLandscapeLeft || orientation == UIInterfaceOrientationLandscapeRight);
@@ -2302,27 +2322,28 @@ static void applySystemRefreshRate(void) {
             cell.detailTextLabel.text = (insulationCpuMode >= 0 && insulationCpuMode < modes.count) ? modes[insulationCpuMode] : modes[0];
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         } else if (indexPath.row == 1) {
-            cell.textLabel.text = @"温控暗屏";
+            // 👑 更名：改为拦截温控暗屏，逻辑更清晰
+            cell.textLabel.text = @"拦截温控暗屏";
             UISwitch *sw = [UISwitch new];
-            sw.on = insulationDimmingEnable;
+            sw.on = blockThermalDimming;
             [sw addTarget:self action:@selector(changeInsulationDimming:) forControlEvents:UIControlEventValueChanged];
             cell.accessoryView = sw;
         } else if (indexPath.row == 2) {
-            cell.textLabel.text = @"禁温度计弹窗";
+            cell.textLabel.text = @"拦截温度计弹窗";
             UISwitch *sw = [UISwitch new];
-            sw.on = insulationDisableThermometer;
+            sw.on = blockThermalAlert;
             [sw addTarget:self action:@selector(changeInsulationThermometer:) forControlEvents:UIControlEventValueChanged];
             cell.accessoryView = sw;
         } else if (indexPath.row == 3) {
-            cell.textLabel.text = @"禁用口袋高温";
+            cell.textLabel.text = @"拦截口袋高温";
             UISwitch *sw = [UISwitch new];
-            sw.on = insulationDisablePocketTemp;
+            sw.on = blockPocketTemp;
             [sw addTarget:self action:@selector(changeInsulationPocket:) forControlEvents:UIControlEventValueChanged];
             cell.accessoryView = sw;
         } else if (indexPath.row == 4) {
-            cell.textLabel.text = @"锁定阳光暴晒";
+            cell.textLabel.text = @"拦截阳光限制";
             UISwitch *sw = [UISwitch new];
-            sw.on = insulationLockSunlight;
+            sw.on = forceSunlightHBM;
             [sw addTarget:self action:@selector(changeInsulationSunlight:) forControlEvents:UIControlEventValueChanged];
             cell.accessoryView = sw;
         }
@@ -2427,7 +2448,6 @@ static void applySystemRefreshRate(void) {
 
             for (NSInteger i = 0; i < titles.count; i++) {
                 [alert addAction:[UIAlertAction actionWithTitle:titles[i] style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-                    (void)action;
                     floatingAlpha = [values[i] floatValue];
                     SavePreferencesAndNotify();
                     applyFloatingAlpha();
@@ -2550,10 +2570,10 @@ static void applySystemRefreshRate(void) {
 - (void)changeShowTemp:(UISwitch *)sw { showBatteryTemperature = sw.isOn; SavePreferencesAndNotify(); updateFloatingSize(); }
 - (void)changeShowCurrent:(UISwitch *)sw { showBatteryCurrent = sw.isOn; SavePreferencesAndNotify(); updateFloatingSize(); }
 
-- (void)changeInsulationDimming:(UISwitch *)sw { insulationDimmingEnable = sw.isOn; SavePreferencesAndNotify(); }
-- (void)changeInsulationThermometer:(UISwitch *)sw { insulationDisableThermometer = sw.isOn; SavePreferencesAndNotify(); }
-- (void)changeInsulationPocket:(UISwitch *)sw { insulationDisablePocketTemp = sw.isOn; SavePreferencesAndNotify(); }
-- (void)changeInsulationSunlight:(UISwitch *)sw { insulationLockSunlight = sw.isOn; SavePreferencesAndNotify(); }
+- (void)changeInsulationDimming:(UISwitch *)sw { blockThermalDimming = sw.isOn; SavePreferencesAndNotify(); }
+- (void)changeInsulationThermometer:(UISwitch *)sw { blockThermalAlert = sw.isOn; SavePreferencesAndNotify(); }
+- (void)changeInsulationPocket:(UISwitch *)sw { blockPocketTemp = sw.isOn; SavePreferencesAndNotify(); }
+- (void)changeInsulationSunlight:(UISwitch *)sw { forceSunlightHBM = sw.isOn; SavePreferencesAndNotify(); }
 
 - (void)changeSmartChargeLimit:(UISwitch *)sw { 
     smartChargeLimitEnable = sw.isOn; 
@@ -2621,19 +2641,33 @@ static void registerV160Observers(void) {
     });
 }
 
-#pragma mark - 9. SpringBoard 侧的温控 UI 拦截
+#pragma mark - 9. SpringBoard 侧的核心拦截防线
+
+// 👑 [三路绞杀]：桌面端也拦截 CoreBrightness 框架下发的暗屏指令
+%hook BrightnessSystemClient
+- (BOOL)setProperty:(id)property forKey:(NSString *)key {
+    if (blockThermalDimming) {
+        if ([key isEqualToString:@"DisplayThermalMitigation"] ||
+            [key isEqualToString:@"ThermalMitigation"] ||
+            [key isEqualToString:@"KeyboardBacklightBrightnessLimit"]) {
+            return YES; // 骗它说写入成功了，其实丢了
+        }
+    }
+    return %orig;
+}
+%end
 
 %hook SBBacklightController
 - (void)setThermalWarningState:(NSInteger)state {
-    if (!insulationDimmingEnable) {
+    if (blockThermalDimming) {
         %orig(0); 
     } else {
         %orig(state);
     }
 }
 - (void)_updateBrightnessForSunlightLoad:(BOOL)arg1 {
-    if (insulationLockSunlight) {
-        %orig(YES);
+    if (forceSunlightHBM) {
+        %orig(NO); // 传入 NO 拦截阳光导致的最高亮度下降
     } else {
         %orig(arg1);
     }
@@ -2642,18 +2676,18 @@ static void registerV160Observers(void) {
 
 %hook SBThermalController
 - (void)showThermalAlertIfNecessary {
-    if (insulationDisableThermometer) return; 
+    if (blockThermalAlert) return; 
     %orig;
 }
 - (BOOL)isThermalBlocked {
-    if (insulationDisableThermometer) return NO;
+    if (blockThermalAlert) return NO;
     return %orig;
 }
 %end
 
 %hook SBPocketStateMonitor
 - (void)pocketStateDidChange:(NSInteger)state {
-    if (insulationDisablePocketTemp) {
+    if (blockPocketTemp) {
         %orig(0); 
     } else {
         %orig(state);
@@ -2689,3 +2723,5 @@ static void registerV160Observers(void) {
         });
     }
 }
+
+
