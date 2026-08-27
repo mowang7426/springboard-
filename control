@@ -1,6 +1,6 @@
-Package: com.yourname.sbcpufloating
+Package: com.sbcpu.floating
 Name: SB CPU Floating
-Version: 1.6.4
+Version: 1.6.6
 Architecture: iphoneos-arm64
 Maintainer: YourName
 Author: YourName
