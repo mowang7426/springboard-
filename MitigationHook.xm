@@ -2,16 +2,10 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 #import <notify.h>
-#import <IOKit/IOKitLib.h>
-
-#ifndef kIOMainPortDefault
-#define kIOMainPortDefault kIOMasterPortDefault
-#endif
 
 #define NOTIFY_CPU_MODE "com.yourname.sbcpufloating.cpumode"
-
-static NSInteger insulationCpuMode = 0;
 static const int InsulationUnrestrictedPowerTarget = 65000;
+static int gNotifyToken = -1;
 
 @interface MitigationController : NSObject
 - (void)setPowerSaveActive:(BOOL)active;
@@ -19,91 +13,80 @@ static const int InsulationUnrestrictedPowerTarget = 65000;
 - (void)setCPULowPowerTarget:(int)power;
 - (void)setCPUPowerCeiling:(int)power fromDecisionSource:(int)source;
 - (void)setCPUPowerZoneTarget:(int)power;
+- (void)updateCPU;
 @end
 
-// =====================================================================
-// 👑 [核弹级黑科技] C 函数直接 Hook (HoldCPU 同款内核穿透拦截)
-// 无论苹果系统怎么想改频率，只要经过这里，全部被篡改！
-// =====================================================================
-
-%hookf(kern_return_t, IORegistryEntrySetCFProperty, io_registry_entry_t entry, CFStringRef propertyName, CFTypeRef property) {
-    if (!propertyName) return %orig(entry, propertyName, property);
-
-    if (insulationCpuMode == 1) {
-        // 【模拟低频模式】拦截系统试图恢复频率的操作，强行丢进垃圾桶并锁死 Level 2
-        if (CFStringCompare(propertyName, CFSTR("p-state-cap"), 0) == kCFCompareEqualTo ||
-            CFStringCompare(propertyName, CFSTR("CPU_Ceiling"), 0) == kCFCompareEqualTo ||
-            CFStringCompare(propertyName, CFSTR("CPU_Floor"), 0) == kCFCompareEqualTo) {
-            return %orig(entry, propertyName, (__bridge CFTypeRef)@(2));
-        }
-    } 
-    else if (insulationCpuMode == 2) {
-        // 【满血防降频模式】拦截系统试图降频的操作，强行置为满血 Level 15 (或 0)
-        if (CFStringCompare(propertyName, CFSTR("p-state-cap"), 0) == kCFCompareEqualTo ||
-            CFStringCompare(propertyName, CFSTR("CPU_Ceiling"), 0) == kCFCompareEqualTo) {
-            return %orig(entry, propertyName, (__bridge CFTypeRef)@(15));
-        }
+// 👑 [最关键修复] 同步强读内核状态，彻底解决主线程死锁导致的指令丢失！
+static NSInteger getRealTimeMitigationMode() {
+    if (gNotifyToken == -1) {
+        notify_register_check(NOTIFY_CPU_MODE, &gNotifyToken);
     }
-    
-    return %orig(entry, propertyName, property);
+    uint64_t state = 0;
+    notify_get_state(gNotifyToken, &state);
+    return (NSInteger)state;
 }
-
-// =====================================================================
-// 常规 Controller 拦截 (双保险)
-// =====================================================================
 
 %hook MitigationController
 
 - (void)setPowerSaveActive:(BOOL)active {
-    if (insulationCpuMode == 1) { %orig(YES); return; }
-    if (insulationCpuMode == 2) { %orig(NO); return; }
+    NSInteger mode = getRealTimeMitigationMode();
+    if (mode == 1) { %orig(YES); return; }
+    if (mode == 2) { %orig(NO); return; }
     %orig(active);
 }
 
 - (void)setCPULevel:(int)level {
-    if (insulationCpuMode == 1) { %orig(2); return; }
-    if (insulationCpuMode == 2) { %orig(0); return; }
+    NSInteger mode = getRealTimeMitigationMode();
+    // 强制锁死 Level 2 (苹果官方底层的降频档位)，绝不脱锁！
+    if (mode == 1) { %orig(2); return; }
+    if (mode == 2) { %orig(0); return; }
     %orig(level);
 }
 
 - (void)setCPULowPowerTarget:(int)power {
-    if (insulationCpuMode == 2) { %orig(MAX(power, InsulationUnrestrictedPowerTarget)); return; }
+    NSInteger mode = getRealTimeMitigationMode();
+    if (mode == 2) { %orig(MAX(power, InsulationUnrestrictedPowerTarget)); return; }
     %orig(power);
 }
 
 - (void)setCPUPowerCeiling:(int)power fromDecisionSource:(int)source {
-    if (insulationCpuMode == 2) { %orig(MAX(power, InsulationUnrestrictedPowerTarget), source); return; }
+    NSInteger mode = getRealTimeMitigationMode();
+    if (mode == 2) { %orig(MAX(power, InsulationUnrestrictedPowerTarget), source); return; }
     %orig(power, source);
 }
 
 - (void)setCPUPowerZoneTarget:(int)power {
-    if (insulationCpuMode == 2) { %orig(MAX(power, InsulationUnrestrictedPowerTarget)); return; }
+    NSInteger mode = getRealTimeMitigationMode();
+    if (mode == 2) { %orig(MAX(power, InsulationUnrestrictedPowerTarget)); return; }
     %orig(power);
+}
+
+- (void)updateCPU {
+    NSInteger mode = getRealTimeMitigationMode();
+    if (mode == 1) {
+        [self setPowerSaveActive:YES];
+        [self setCPULevel:2];
+    } else if (mode == 2) {
+        [self setPowerSaveActive:NO];
+        [self setCPULevel:0];
+    }
+    %orig;
 }
 
 %end
 
-// =====================================================================
-// 初始化与进程注入
-// =====================================================================
-
 %ctor {
-    // ⚠️ 我们这次同时注入了 thermalmonitord 和 powerd
     NSString *processName = [NSProcessInfo processInfo].processName;
-    if (![processName isEqualToString:@"thermalmonitord"] && ![processName isEqualToString:@"powerd"]) {
-        return;
-    }
+    if (![processName isEqualToString:@"thermalmonitord"]) return;
 
     %init;
 
-    // 监听来自桌面的模式切换指令
-    int token;
-    notify_register_dispatch(NOTIFY_CPU_MODE, &token, dispatch_get_main_queue(), ^(int t) {
-        uint64_t state = 0;
-        if (notify_get_state(t, &state) == NOTIFY_STATUS_OK) {
-            insulationCpuMode = (NSInteger)state;
-            
-            // 收到指令后，主动触发一次底层刷新，让 Hook 瞬间生效
+    // 🚀 死守反击定时器：放入底层 Global Queue，绝对不被卡死！
+    dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0));
+    dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 1.0 * NSEC_PER_SEC), 1.0 * NSEC_PER_SEC, 0.1 * NSEC_PER_SEC);
+    dispatch_source_set_event_handler(timer, ^{
+        NSInteger mode = getRealTimeMitigationMode();
+        if (mode != 0) {
             Class cls = objc_getClass("MitigationController");
             if (cls && [cls respondsToSelector:@selector(sharedInstance)]) {
                 id controller = [cls performSelector:@selector(sharedInstance)];
@@ -113,10 +96,6 @@ static const int InsulationUnrestrictedPowerTarget = 65000;
             }
         }
     });
-
-    uint64_t initialState = 0;
-    if (notify_get_state(token, &initialState) == NOTIFY_STATUS_OK) {
-        insulationCpuMode = (NSInteger)initialState;
-    }
+    dispatch_resume(timer);
 }
 
