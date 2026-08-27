@@ -386,17 +386,17 @@ static DeviceSpec getDeviceSpec(void) {
     sysctlbyname("hw.machine", machine, &size, NULL, 0);
     NSString *platform = [NSString stringWithUTF8String:machine];
 
-    if ([platform isEqualToString:@"iPhone16,2"]) return (DeviceSpec){"iPhone16,2", "iPhone 15 Pro Max", "A17 Pro", 6, 3780.0, 4422};
-    if ([platform isEqualToString:@"iPhone16,1"]) return (DeviceSpec){"iPhone16,1", "iPhone 15 Pro", "A17 Pro", 6, 3780.0, 3274};
-    if ([platform isEqualToString:@"iPhone15,5"]) return (DeviceSpec){"iPhone15,5", "iPhone 15 Plus", "A16 Bionic", 6, 3468.0, 4383};
-    if ([platform isEqualToString:@"iPhone15,4"]) return (DeviceSpec){"iPhone15,4", "iPhone 15", "A16 Bionic", 6, 3349.0, 3349};
-    if ([platform isEqualToString:@"iPhone15,3"]) return (DeviceSpec){"iPhone15,3", "iPhone 14 Pro Max", "A16 Bionic", 6, 3468.0, 4323};
-    if ([platform isEqualToString:@"iPhone15,2"]) return (DeviceSpec){"iPhone15,2", "iPhone 14 Pro", "A16 Bionic", 6, 3468.0, 3200};
-    if ([platform isEqualToString:@"iPhone17,1"]) return (DeviceSpec){"iPhone17,1", "iPhone 16 Pro", "A18 Pro", 6, 4040.0, 3582};
-    if ([platform isEqualToString:@"iPhone17,2"]) return (DeviceSpec){"iPhone17,2", "iPhone 16 Pro Max", "A18 Pro", 6, 4040.0, 4685};
+    if ([platform isEqualToString:@"iPhone16,2"]) return DeviceSpec{"iPhone16,2", "iPhone 15 Pro Max", "A17 Pro", 6, 3780.0, 4422};
+    if ([platform isEqualToString:@"iPhone16,1"]) return DeviceSpec{"iPhone16,1", "iPhone 15 Pro", "A17 Pro", 6, 3780.0, 3274};
+    if ([platform isEqualToString:@"iPhone15,5"]) return DeviceSpec{"iPhone15,5", "iPhone 15 Plus", "A16 Bionic", 6, 3468.0, 4383};
+    if ([platform isEqualToString:@"iPhone15,4"]) return DeviceSpec{"iPhone15,4", "iPhone 15", "A16 Bionic", 6, 3349.0, 3349};
+    if ([platform isEqualToString:@"iPhone15,3"]) return DeviceSpec{"iPhone15,3", "iPhone 14 Pro Max", "A16 Bionic", 6, 3468.0, 4323};
+    if ([platform isEqualToString:@"iPhone15,2"]) return DeviceSpec{"iPhone15,2", "iPhone 14 Pro", "A16 Bionic", 6, 3468.0, 3200};
+    if ([platform isEqualToString:@"iPhone17,1"]) return DeviceSpec{"iPhone17,1", "iPhone 16 Pro", "A18 Pro", 6, 4040.0, 3582};
+    if ([platform isEqualToString:@"iPhone17,2"]) return DeviceSpec{"iPhone17,2", "iPhone 16 Pro Max", "A18 Pro", 6, 4040.0, 4685};
 
     NSInteger activeCores = [NSProcessInfo processInfo].processorCount;
-    return (DeviceSpec){machine, "iPhone", "Apple Silicon", activeCores, 3468.0, 4000};
+    return DeviceSpec{machine, "iPhone", "Apple Silicon", activeCores, 3468.0, 4000};
 }
 
 static BOOL getBoolPref(CFStringRef key, BOOL defaultVal) {
@@ -968,7 +968,7 @@ static void checkHighCPU(double cpu) {
             [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:^(UIAlertAction *action) {
                 logoutCounting = NO;
                 cpuHighStartTime = nil;
-            }]];
+            }]]];
             [root presentViewController:alert animated:YES completion:nil];
 
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
