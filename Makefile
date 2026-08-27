@@ -1,4 +1,4 @@
-```makefile
+
 ARCHS = arm64 arm64e
 TARGET = iphone:clang:16.5:14.0
 
@@ -23,4 +23,3 @@ include $(THEOS_MAKE_PATH)/tweak.mk
 # 注入桌面、温控、电源总控三大核心进程
 INSTALL_TARGET_PROCESSES = SpringBoard thermalmonitord powerd
 
-```
