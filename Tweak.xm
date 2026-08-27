@@ -44,6 +44,37 @@
 - (float)idealRefreshRate;
 @end
 
+// === V2.8: Notification Private APIs ===
+@interface NCNotificationContent : NSObject
+@property (nonatomic, copy, readonly) NSString *header;
+@property (nonatomic, copy, readonly) NSString *title;
+@property (nonatomic, copy, readonly) NSString *subtitle;
+@property (nonatomic, copy, readonly) NSString *message;
+@end
+
+@interface NCNotificationAction : NSObject
+@property (nonatomic, copy, readonly) NSURL *launchURL;
+@property (nonatomic, copy, readonly) NSString *launchBundleID;
+@end
+
+@interface NCNotificationRequest : NSObject
+@property (nonatomic, copy, readonly) NSString *notificationIdentifier;
+@property (nonatomic, copy, readonly) NSString *sectionIdentifier; // BundleID
+@property (nonatomic, readonly) NCNotificationContent *content;
+@property (nonatomic, readonly) NCNotificationAction *defaultAction;
+@property (nonatomic, readonly) NSDate *timestamp;
+@end
+
+@interface FBSOpenApplicationService : NSObject
++ (id)sharedInstance;
+- (void)openApplication:(id)arg1 withOptions:(id)arg2 completion:(id)arg3;
+@end
+
+@interface SBLockScreenManager : NSObject
++ (id)sharedInstance;
+- (BOOL)isUILocked;
+@end
+
 typedef struct {
     const char *platform;
     const char *modelName;
@@ -88,7 +119,7 @@ typedef struct {
 @property (nonatomic, strong) UILabel *batteryValueLabel;
 @property (nonatomic, strong) UILabel *batterySubLabel;
 @property (nonatomic, strong) UIView *div2;
-@property (nonatomic, strong) UILabel *tempIconLabel; // 完全保留你的温度计
+@property (nonatomic, strong) UILabel *tempIconLabel;
 @property (nonatomic, strong) UILabel *tempValueLabel;
 @property (nonatomic, strong) UILabel *tempSubLabel;
 @property (nonatomic, strong) UIView *div3;
@@ -101,6 +132,18 @@ typedef struct {
 @property (nonatomic, strong) UIView *collapsedContainerView;
 @property (nonatomic, strong) UIView *statusDot;
 @property (nonatomic, strong) UILabel *miniCpuLabel;
+
+// === V2.8: 通知管理 UI 组件 ===
+@property (nonatomic, strong) UILabel *badgeLabel;
+@property (nonatomic, strong) UIView *notifSeparator;
+@property (nonatomic, strong) UILabel *notifAppNameLabel;
+@property (nonatomic, strong) UILabel *notifSenderLabel;
+@property (nonatomic, strong) UILabel *notifMessageLabel;
+@property (nonatomic, assign) BOOL isShowingNotification;
+@property (nonatomic, strong) NSMutableArray<NCNotificationRequest *> *notificationQueue;
+@property (nonatomic, strong) NCNotificationRequest *currentNotification;
+@property (nonatomic, strong) NSTimer *notificationTimer;
+
 @property (nonatomic, assign) BOOL isCollapsed;
 @property (nonatomic, strong) NSTimer *inactivityTimer;
 @property (nonatomic, strong) UITapGestureRecognizer *singleTapGesture;
@@ -112,6 +155,10 @@ typedef struct {
 - (void)triggerPlugAnimation;
 - (void)updateLayoutWithShowCpuFreq:(BOOL)showFreq showFps:(BOOL)showFps showBatteryPercent:(BOOL)showBattery showBatteryTemp:(BOOL)showTemp showBatteryCurrent:(BOOL)showCurrent isCharging:(BOOL)isCharging;
 - (void)updateDataWithCPU:(double)cpu cpuFreq:(double)cpuFreq fps:(double)fps battery:(NSInteger)battery temp:(double)temp current:(double)current isCharging:(BOOL)isCharging;
+
+// === V2.8: 通知交互方法 ===
+- (void)showNotification:(NCNotificationRequest *)req;
+- (void)hideNotification;
 @end
 
 @interface SBCPUPassthroughView : UIView
@@ -207,6 +254,15 @@ static uint64_t speedUpBytesPerSec = 0;
 static uint64_t speedDownBytesPerSec = 0;
 static CFAbsoluteTime lastNetSpeedTime = 0;
 
+// === V2.8: 通知管理状态 ===
+static BOOL notificationEnable = YES;
+static BOOL wechatEnable = YES;
+static BOOL qqEnable = YES;
+static BOOL timEnable = YES;
+static BOOL hideContentOnLockScreen = NO;
+static NSInteger notificationDuration = 5;
+static NSMutableArray<NCNotificationRequest *> *historyNotifications = nil;
+
 
 #pragma mark - 4. 所有的底层 C 函数前置声明
 
@@ -240,7 +296,7 @@ static double getBatteryCurrentInternal(void);
 static BOOL isChargingInternal(void);
 
 static double getSpringBoardCPUUsage(void);
-static double getTotalCPUUsage(void); // 🟢 声明全系统总CPU获取函数
+static double getTotalCPUUsage(void); 
 static double getRealCPUFrequency(double currentCpuUsage);
 static void setHardwareChargingInhibit(BOOL inhibit);
 static NSString *getNetworkType(void);
@@ -255,7 +311,69 @@ static void SendCPUModeToDaemon(NSInteger mode, BOOL blockDimming, BOOL forceFas
     }
 }
 
-#pragma mark - 5. 底层 C 函数具体实现
+
+#pragma mark - 5. V2.8: Notification Manager (逻辑层)
+
+@interface SBNotificationManager : NSObject
++ (instancetype)sharedInstance;
+- (void)handleNewNotification:(NCNotificationRequest *)req;
+@end
+
+@implementation SBNotificationManager
++ (instancetype)sharedInstance {
+    static SBNotificationManager *instance = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        instance = [[SBNotificationManager alloc] init];
+        historyNotifications = [[NSMutableArray alloc] init];
+    });
+    return instance;
+}
+
+- (void)handleNewNotification:(NCNotificationRequest *)req {
+    if (!notificationEnable) return;
+    
+    NSString *bundleID = req.sectionIdentifier;
+    BOOL shouldShow = NO;
+    if (wechatEnable && [bundleID isEqualToString:@"com.tencent.xin"]) shouldShow = YES;
+    if (qqEnable && [bundleID isEqualToString:@"com.tencent.mobileqq"]) shouldShow = YES;
+    if (timEnable && [bundleID isEqualToString:@"com.tencent.tim"]) shouldShow = YES;
+    
+    // 支持其它必要通知可以在此扩充
+    if (!shouldShow) return;
+    
+    dispatch_async(dispatch_get_main_queue(), ^{
+        // 存储到历史列队（保留最近20条）
+        [historyNotifications insertObject:req atIndex:0];
+        if (historyNotifications.count > 20) {
+            [historyNotifications removeLastObject];
+        }
+        
+        if (floatingView) {
+            // 防抖与重复过滤
+            BOOL exists = NO;
+            for (NCNotificationRequest *existing in floatingView.notificationQueue) {
+                if ([existing.notificationIdentifier isEqualToString:req.notificationIdentifier]) {
+                    exists = YES; break;
+                }
+            }
+            if (!exists) {
+                [floatingView.notificationQueue addObject:req];
+                // 如果当前未在显示通知，触发显示
+                if (!floatingView.isShowingNotification) {
+                    [floatingView showNotification:floatingView.notificationQueue.firstObject];
+                } else {
+                    // 更新数字角标
+                    [floatingView showNotification:floatingView.currentNotification];
+                }
+            }
+        }
+    });
+}
+@end
+
+
+#pragma mark - 6. 底层 C 函数具体实现
 
 static DeviceSpec getDeviceSpec(void) {
     char machine[256] = {0};
@@ -375,6 +493,14 @@ static void LoadPreferences(void) {
     smartChargeLimitEnable = getBoolPref(CFSTR("smartChargeLimitEnable"), NO);
     smartChargeLimitTemp = getFloatPref(CFSTR("smartChargeLimitTemp"), 38.0f);
     forceFastChargeEnable = getBoolPref(CFSTR("forceFastChargeEnable"), NO); 
+    
+    // === V2.8 通知配置加载 ===
+    notificationEnable = getBoolPref(CFSTR("notificationEnable"), YES);
+    wechatEnable = getBoolPref(CFSTR("wechatEnable"), YES);
+    qqEnable = getBoolPref(CFSTR("qqEnable"), YES);
+    timEnable = getBoolPref(CFSTR("timEnable"), YES);
+    hideContentOnLockScreen = getBoolPref(CFSTR("hideContentOnLockScreen"), NO);
+    notificationDuration = getIntPref(CFSTR("notificationDuration"), 5);
 
     NSString *processName = [NSProcessInfo processInfo].processName;
     if ([processName isEqualToString:@"SpringBoard"]) {
@@ -431,6 +557,14 @@ static void SavePreferencesAndNotify(void) {
     setBoolPref(CFSTR("smartChargeLimitEnable"), smartChargeLimitEnable);
     setFloatPref(CFSTR("smartChargeLimitTemp"), smartChargeLimitTemp);
     setBoolPref(CFSTR("forceFastChargeEnable"), forceFastChargeEnable); 
+    
+    // === V2.8 通知配置保存 ===
+    setBoolPref(CFSTR("notificationEnable"), notificationEnable);
+    setBoolPref(CFSTR("wechatEnable"), wechatEnable);
+    setBoolPref(CFSTR("qqEnable"), qqEnable);
+    setBoolPref(CFSTR("timEnable"), timEnable);
+    setBoolPref(CFSTR("hideContentOnLockScreen"), hideContentOnLockScreen);
+    setIntPref(CFSTR("notificationDuration"), notificationDuration);
     
     CFPreferencesSynchronize(kPrefAppID, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
 
@@ -556,7 +690,6 @@ static BOOL isDeviceOverheated(void) {
     return getBatteryTemperatureInternal() >= 43.0;
 }
 
-// 供悬浮球使用的 SpringBoard 单进程 CPU
 static double getSpringBoardCPUUsage(void) {
     kern_return_t kr;
     thread_array_t thread_list;
@@ -587,7 +720,6 @@ static double getSpringBoardCPUUsage(void) {
     return total_cpu;
 }
 
-// 🟢 解决编译报错：恢复全局物理总 CPU 进程数据抓取功能（仅供详情页面显示）
 static double getTotalCPUUsage(void) {
     kern_return_t kr;
     mach_msg_type_number_t count;
@@ -880,7 +1012,6 @@ static void checkHighCPU(double cpu) {
 static void updateCPU(void) {
     if (!isEnabled) return;
 
-    // 🟢 保持浮窗依然读取你的 SpringBoard 进程，绝不干扰
     double cpu = getSpringBoardCPUUsage();
     double cpuFreq = getRealCPUFrequency(cpu);
     double fps = [SBCPUFPSHelper sharedInstance].currentFPS;
@@ -983,7 +1114,7 @@ static void applySystemRefreshRate(void) {
     [[SBCPUFPSHelper sharedInstance] updateFrameRate];
 }
 
-#pragma mark - 6. 所有的 Objective-C 类实现区块
+#pragma mark - 7. 所有的 Objective-C 类实现区块
 
 @implementation SBCPUFPSHelper {
     CADisplayLink *_displayLink;
@@ -1100,6 +1231,8 @@ static void applySystemRefreshRate(void) {
         self.userInteractionEnabled = YES;
         self.multipleTouchEnabled = NO;
         _isCollapsed = NO;
+        _isShowingNotification = NO;
+        _notificationQueue = [[NSMutableArray alloc] init];
         
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
         pan.delegate = self;
@@ -1217,7 +1350,6 @@ static void applySystemRefreshRate(void) {
         _div2.backgroundColor = [UIColor colorWithWhite:0.0f alpha:0.1f];
         [content addSubview:_div2];
 
-        // 🟢 恢复原生的带色彩的小温度计 Emoji，并通过旋转摆正它（代码原封不动）
         _tempIconLabel = [[UILabel alloc] init];
         _tempIconLabel.text = @"🌡";
         _tempIconLabel.font = [UIFont systemFontOfSize:17];
@@ -1291,6 +1423,41 @@ static void applySystemRefreshRate(void) {
         _miniCpuLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightBold];
         _miniCpuLabel.textAlignment = NSTextAlignmentLeft;
         [_collapsedContainerView addSubview:_miniCpuLabel];
+        
+        // === V2.8 通知视图初始化 ===
+        _notifSeparator = [[UIView alloc] init];
+        _notifSeparator.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.1];
+        _notifSeparator.hidden = YES;
+        [content addSubview:_notifSeparator];
+
+        _notifAppNameLabel = [[UILabel alloc] init];
+        _notifAppNameLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightBold];
+        _notifAppNameLabel.textColor = [UIColor darkGrayColor];
+        _notifAppNameLabel.hidden = YES;
+        [content addSubview:_notifAppNameLabel];
+
+        _notifSenderLabel = [[UILabel alloc] init];
+        _notifSenderLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightBold];
+        _notifSenderLabel.textColor = [UIColor blackColor];
+        _notifSenderLabel.hidden = YES;
+        [content addSubview:_notifSenderLabel];
+
+        _notifMessageLabel = [[UILabel alloc] init];
+        _notifMessageLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
+        _notifMessageLabel.textColor = [UIColor darkGrayColor];
+        _notifMessageLabel.numberOfLines = 2;
+        _notifMessageLabel.hidden = YES;
+        [content addSubview:_notifMessageLabel];
+
+        _badgeLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, -6, 24, 14)];
+        _badgeLabel.backgroundColor = [UIColor systemRedColor];
+        _badgeLabel.textColor = [UIColor whiteColor];
+        _badgeLabel.font = [UIFont systemFontOfSize:9 weight:UIFontWeightBold];
+        _badgeLabel.textAlignment = NSTextAlignmentCenter;
+        _badgeLabel.layer.cornerRadius = 7;
+        _badgeLabel.layer.masksToBounds = YES;
+        _badgeLabel.hidden = YES;
+        [self addSubview:_badgeLabel];
 
         [self resetInactivityTimer];
     }
@@ -1314,7 +1481,7 @@ static void applySystemRefreshRate(void) {
         [_inactivityTimer invalidate];
         _inactivityTimer = nil;
     }
-    if (autoCollapseEnable && !_isCollapsed && !settingsShowing && !detailShowing) {
+    if (autoCollapseEnable && !_isCollapsed && !settingsShowing && !detailShowing && !_isShowingNotification) {
         if (autoExpandLandscape) {
             UIInterfaceOrientation orientation = getActiveInterfaceOrientation();
             BOOL isLandscape = (orientation == UIInterfaceOrientationLandscapeLeft || orientation == UIInterfaceOrientationLandscapeRight);
@@ -1333,7 +1500,7 @@ static void applySystemRefreshRate(void) {
     [_inactivityTimer invalidate];
     _inactivityTimer = nil; 
 
-    if (!settingsShowing && !detailShowing && !_isCollapsed) {
+    if (!settingsShowing && !detailShowing && !_isCollapsed && !_isShowingNotification) {
         UIInterfaceOrientation orientation = getActiveInterfaceOrientation();
         BOOL isLandscape = (orientation == UIInterfaceOrientationLandscapeLeft || orientation == UIInterfaceOrientationLandscapeRight);
         if (autoExpandLandscape && isLandscape) {
@@ -1345,6 +1512,7 @@ static void applySystemRefreshRate(void) {
 
 - (void)collapseToEdgeAnimated:(BOOL)animated {
     if (_isCollapsed) return;
+    if (_isShowingNotification) return; // 通知显示时不折叠
     _isCollapsed = YES;
 
     UIView *parent = self.superview;
@@ -1399,6 +1567,10 @@ static void applySystemRefreshRate(void) {
         self.blurView.layer.cornerRadius = cornerRad;
         self.bounds = CGRectMake(0, 0, targetW, targetH);
         self.center = targetCenter;
+        
+        if (!self.badgeLabel.hidden) {
+            self.badgeLabel.frame = CGRectMake(targetW - 12, -6, 24, 14);
+        }
 
         self.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, 0, targetW, targetH) cornerRadius:cornerRad].CGPath;
         self.marqueeLayer.frame = self.blurView.bounds;
@@ -1539,8 +1711,27 @@ static void applySystemRefreshRate(void) {
 
 - (void)handleSingleTap:(UITapGestureRecognizer *)tap {
     if (tap.state == UIGestureRecognizerStateEnded) {
-        if (_isCollapsed) [self expandFromEdgeAnimated:YES];
-        else [self resetInactivityTimer];
+        // === V2.8 通知直达点击逻辑 ===
+        if (_isShowingNotification && _currentNotification) {
+            NSString *bundleID = _currentNotification.sectionIdentifier;
+            NCNotificationAction *action = _currentNotification.defaultAction;
+            
+            if (action && [action respondsToSelector:@selector(launchURL)] && action.launchURL) {
+                [[UIApplication sharedApplication] openURL:action.launchURL options:@{} completionHandler:nil];
+            } else {
+                Class fbsClass = NSClassFromString(@"FBSOpenApplicationService");
+                if (fbsClass && [fbsClass respondsToSelector:@selector(sharedInstance)]) {
+                    id service = [fbsClass sharedInstance];
+                    if ([service respondsToSelector:@selector(openApplication:withOptions:completion:)]) {
+                        [service openApplication:bundleID withOptions:nil completion:nil];
+                    }
+                }
+            }
+            [self hideNotification];
+        } else {
+            if (_isCollapsed) [self expandFromEdgeAnimated:YES];
+            else [self resetInactivityTimer];
+        }
     }
 }
 
@@ -1729,7 +1920,42 @@ static void applySystemRefreshRate(void) {
         currentY += 14.0f;
     }
 
+    // === V2.8 通知高度计算与布局 ===
+    if (self.isShowingNotification) {
+        currentY += 8.0f;
+        CGFloat notifStartY = currentY;
+        _notifSeparator.hidden = NO;
+        _notifAppNameLabel.hidden = NO;
+        _notifSenderLabel.hidden = NO;
+        _notifMessageLabel.hidden = NO;
+
+        _notifSeparator.frame = CGRectMake(12.0f, notifStartY, finalW - 24.0f, 0.5f);
+        notifStartY += 8.0f;
+        _notifAppNameLabel.frame = CGRectMake(16.0f, notifStartY, finalW - 32.0f, 14.0f);
+        notifStartY += 18.0f;
+        _notifSenderLabel.frame = CGRectMake(16.0f, notifStartY, finalW - 32.0f, 16.0f);
+        notifStartY += 18.0f;
+        _notifMessageLabel.frame = CGRectMake(16.0f, notifStartY, finalW - 32.0f, 32.0f);
+        notifStartY += 38.0f;
+        
+        currentY = notifStartY;
+    } else {
+        _notifSeparator.hidden = YES;
+        _notifAppNameLabel.hidden = YES;
+        _notifSenderLabel.hidden = YES;
+        _notifMessageLabel.hidden = YES;
+    }
+
     currentY += 10.0f; 
+
+    // 数字角标
+    if (historyNotifications.count > 0 && !_isShowingNotification) {
+        self.badgeLabel.hidden = NO;
+        self.badgeLabel.text = [NSString stringWithFormat:@"%lu", (unsigned long)historyNotifications.count];
+        self.badgeLabel.frame = CGRectMake(finalW - 20, -6, 24, 14);
+    } else {
+        self.badgeLabel.hidden = YES;
+    }
 
     _blurView.frame = CGRectMake(0, 0, finalW, currentY);
     
@@ -1816,9 +2042,64 @@ static void applySystemRefreshRate(void) {
     }
 }
 
+// === V2.8 通知管理核心扩展 ===
+- (void)showNotification:(NCNotificationRequest *)req {
+    _isShowingNotification = YES;
+    _currentNotification = req;
+    
+    if (_isCollapsed) {
+        [self expandFromEdgeAnimated:NO];
+    }
+    [_inactivityTimer invalidate]; _inactivityTimer = nil;
+    
+    [_notificationTimer invalidate];
+    _notificationTimer = [NSTimer scheduledTimerWithTimeInterval:notificationDuration target:self selector:@selector(hideNotification) userInfo:nil repeats:NO];
+    
+    NSString *appName = @"消息";
+    if ([req.sectionIdentifier isEqualToString:@"com.tencent.xin"]) appName = @"🟢 微信";
+    else if ([req.sectionIdentifier isEqualToString:@"com.tencent.mobileqq"]) appName = @"🔵 QQ";
+    else if ([req.sectionIdentifier isEqualToString:@"com.tencent.tim"]) appName = @"🔷 TIM";
+    
+    _notifAppNameLabel.text = [NSString stringWithFormat:@"%@ (%lu)", appName, (unsigned long)_notificationQueue.count];
+    _notifSenderLabel.text = req.content.title ?: req.content.subtitle ?: @"新消息";
+    
+    BOOL isLocked = NO;
+    if (NSClassFromString(@"SBLockScreenManager")) {
+        isLocked = [[NSClassFromString(@"SBLockScreenManager") sharedInstance] isUILocked];
+    }
+    if (hideContentOnLockScreen && isLocked) {
+        _notifMessageLabel.text = @"你收到一条新消息";
+    } else {
+        _notifMessageLabel.text = req.content.message ?: @"";
+    }
+    
+    [UIView animateWithDuration:0.45 delay:0 usingSpringWithDamping:0.75 initialSpringVelocity:0.5 options:UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionBeginFromCurrentState animations:^{
+        updateFloatingSize();
+    } completion:nil];
+}
+
+- (void)hideNotification {
+    if (_notificationQueue.count > 0) {
+        [_notificationQueue removeObjectAtIndex:0];
+    }
+    if (_notificationQueue.count > 0) {
+        [self showNotification:_notificationQueue.firstObject];
+        return;
+    }
+    
+    _isShowingNotification = NO;
+    _currentNotification = nil;
+    
+    [UIView animateWithDuration:0.45 delay:0 usingSpringWithDamping:0.75 initialSpringVelocity:0.5 options:UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionBeginFromCurrentState animations:^{
+        updateFloatingSize();
+    } completion:^(BOOL finished) {
+        [self resetInactivityTimer];
+    }];
+}
+
 @end
 
-#pragma mark - 7. 详细状态 UI 面板与数据绑定
+#pragma mark - 8. 详细状态 UI 面板与数据绑定
 
 @implementation SBCPUDetailViewController
 
@@ -1881,7 +2162,6 @@ static void applySystemRefreshRate(void) {
         @"电池当前电量", @"电池设计容量", @"电池实际容量", @"电池当前容量"
     ];
 
-    // 🟢 精准修改：详情页只改成系统总 CPU（解决你的报错问题）
     NSArray *rightKeys = @[
         @"设备名称", @"软件版本", @"网络信息", @"内网地址",
         @"实时网速", @"系统总 CPU", @"CPU主频 / FPS", @"内存剩余",
@@ -2048,7 +2328,6 @@ static void applySystemRefreshRate(void) {
     }
     _labelsDict[@"实时网速"].text = [NSString stringWithFormat:@"↑%lluK ↓%lluK", speedUpBytesPerSec / 1024, speedDownBytesPerSec / 1024];
 
-    // 🟢 精准调用系统总 CPU 函数，彻底解决之前 unused function 的警告报错
     double totalSystemCpu = getTotalCPUUsage();
     _labelsDict[@"系统总 CPU"].text = [NSString stringWithFormat:@"%s %ld核心 %.0f%%", spec.chipName, (long)spec.cores, totalSystemCpu];
 
@@ -2220,7 +2499,7 @@ static void applySystemRefreshRate(void) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.title = @"SBCPUFloating 设置";
+    self.title = @"SB Floating V2.8 设置";
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone target:self action:@selector(closeSettings)];
 }
 
@@ -2234,7 +2513,7 @@ static void applySystemRefreshRate(void) {
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { 
     (void)tableView;
-    return 8; 
+    return 9; // V2.8: 新增了通知管理，共9个分区
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
@@ -2242,10 +2521,11 @@ static void applySystemRefreshRate(void) {
     if (section == 0) return 4; 
     if (section == 1) return 3;
     if (section == 2) return 5;
-    if (section == 3) return 3;
-    if (section == 4) return 2;
-    if (section == 5) return 5;
-    if (section == 6) return 3; 
+    if (section == 3) return 6; // 通知管理
+    if (section == 4) return 3;
+    if (section == 5) return 2;
+    if (section == 6) return 5;
+    if (section == 7) return 3; 
     return 6;
 }
 
@@ -2254,22 +2534,26 @@ static void applySystemRefreshRate(void) {
     if (section == 0) return @"📱 智能缩进与侧边吸附";
     if (section == 1) return @"⚡ 自动控制与防护";
     if (section == 2) return @"🔲 悬浮窗外观";
-    if (section == 3) return @"🧠 智能选项";
-    if (section == 4) return @"🎮 性能与高刷锁定";
-    if (section == 5) return @"🌡️ Insulation (温控核心)"; 
-    if (section == 6) return @"🔌 电池温控与断充";
+    if (section == 3) return @"💬 消息与通知管理"; // V2.8 新增
+    if (section == 4) return @"🧠 智能选项";
+    if (section == 5) return @"🎮 性能与高刷锁定";
+    if (section == 6) return @"🌡️ Insulation (温控核心)"; 
+    if (section == 7) return @"🔌 电池温控与断充";
     return @"📍 位置与显示";
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     (void)tableView;
-    if (section == 4) {
-        return @"💡 功能说明：\n1. 强制 120Hz 高刷模式：通过底层硬件合成器与微像素渲染驱动，全局锁定 120Hz 满帧，彻底杜绝屏幕静止降频。\n2. 智能温控降频保护：开启时若检测到电池温度 ≥43°C 或系统过热警报将自动降频保护；关闭后解除温控限制，发热也强行保持 120Hz。";
+    if (section == 3) {
+        return @"💡 开启通知后，当收到微信、QQ等消息时，浮窗将向下延展并展示消息。\n锁屏隐私：开启后若设备处于锁定状态，将隐藏具体消息内容。\n直达聊天：点击通知浮窗将尝试直接呼起对应的聊天对话。";
     }
     if (section == 5) {
-        return @"💡 模式说明：\n1. 模拟低电频率：在温控守护进程中锁定 CPU Level 2，真正拉降整机硬件功耗与频率。\n2. 防止温控降频：无论发热多高均把 CPU 保持在 Level 0 满血状态，释放极限性能。";
+        return @"💡 功能说明：\n1. 强制 120Hz 高刷模式：通过底层硬件合成器与微像素渲染驱动，全局锁定 120Hz 满帧，彻底杜绝屏幕静止降频。\n2. 智能温控降频保护：开启时若检测到电池温度 ≥43°C 或系统过热警报将自动降频保护；关闭后解除温控限制，发热也强行保持 120Hz。";
     }
     if (section == 6) {
+        return @"💡 模式说明：\n1. 模拟低电频率：在温控守护进程中锁定 CPU Level 2，真正拉降整机硬件功耗与频率。\n2. 防止温控降频：无论发热多高均把 CPU 保持在 Level 0 满血状态，释放极限性能。";
+    }
+    if (section == 7) {
         return @"💡 边充边玩黄金组合：开启高温智能断充后，一旦温度超过阈值，系统将切断充电（旁路供电）。\n🔥 强制满血快充：利用内核底层技术直接拉黑并拦截手机热量引起的限流指令，满载发烫也强行以最高功率快充！";
     }
     return nil;
@@ -2352,6 +2636,38 @@ static void applySystemRefreshRate(void) {
             cell.detailTextLabel.text = [NSString stringWithFormat:@"%.0f", floatingCornerRadius];
         }
     } else if (indexPath.section == 3) {
+        // === V2.8 通知管理分区 ===
+        if (indexPath.row == 0) {
+            cell.textLabel.text = @"启用通知管理";
+            UISwitch *sw = [UISwitch new]; sw.on = notificationEnable;
+            [sw addTarget:self action:@selector(changeNotificationEnable:) forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = sw;
+        } else if (indexPath.row == 1) {
+            cell.textLabel.text = @"微信通知";
+            UISwitch *sw = [UISwitch new]; sw.on = wechatEnable;
+            [sw addTarget:self action:@selector(changeWechatEnable:) forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = sw;
+        } else if (indexPath.row == 2) {
+            cell.textLabel.text = @"QQ通知";
+            UISwitch *sw = [UISwitch new]; sw.on = qqEnable;
+            [sw addTarget:self action:@selector(changeQqEnable:) forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = sw;
+        } else if (indexPath.row == 3) {
+            cell.textLabel.text = @"TIM通知";
+            UISwitch *sw = [UISwitch new]; sw.on = timEnable;
+            [sw addTarget:self action:@selector(changeTimEnable:) forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = sw;
+        } else if (indexPath.row == 4) {
+            cell.textLabel.text = @"锁屏隐藏消息内容 (隐私)";
+            UISwitch *sw = [UISwitch new]; sw.on = hideContentOnLockScreen;
+            [sw addTarget:self action:@selector(changeHideContentLockScreen:) forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = sw;
+        } else if (indexPath.row == 5) {
+            cell.textLabel.text = @"通知显示时间";
+            cell.detailTextLabel.text = [NSString stringWithFormat:@"%ld 秒", (long)notificationDuration];
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        }
+    } else if (indexPath.section == 4) {
         if (indexPath.row == 0) {
             cell.textLabel.text = @"键盘避让";
             UISwitch *sw = [UISwitch new];
@@ -2370,7 +2686,7 @@ static void applySystemRefreshRate(void) {
             cell.detailTextLabel.text = (dockMode >= 0 && dockMode < modes.count) ? modes[dockMode] : @"自动";
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         }
-    } else if (indexPath.section == 4) {
+    } else if (indexPath.section == 5) {
         if (indexPath.row == 0) {
             cell.textLabel.text = @"强制 120Hz 高刷模式";
             UISwitch *sw = [UISwitch new];
@@ -2384,7 +2700,7 @@ static void applySystemRefreshRate(void) {
             [sw addTarget:self action:@selector(changeThermalProtection:) forControlEvents:UIControlEventValueChanged];
             cell.accessoryView = sw;
         }
-    } else if (indexPath.section == 5) {
+    } else if (indexPath.section == 6) {
         if (indexPath.row == 0) {
             cell.textLabel.text = @"CPU 模式";
             NSArray *modes = @[@"苹果原生温控", @"模拟低电频率", @"防止温控降频"];
@@ -2415,7 +2731,7 @@ static void applySystemRefreshRate(void) {
             [sw addTarget:self action:@selector(changeInsulationSunlight:) forControlEvents:UIControlEventValueChanged];
             cell.accessoryView = sw;
         }
-    } else if (indexPath.section == 6) {
+    } else if (indexPath.section == 7) {
         if (indexPath.row == 0) {
             cell.textLabel.text = @"开启高温智能断充";
             UISwitch *sw = [UISwitch new];
@@ -2433,7 +2749,7 @@ static void applySystemRefreshRate(void) {
             [sw addTarget:self action:@selector(changeForceFastCharge:) forControlEvents:UIControlEventValueChanged];
             cell.accessoryView = sw;
         }
-    } else if (indexPath.section == 7) {
+    } else if (indexPath.section == 8) {
         if (indexPath.row == 0) {
             cell.textLabel.text = @"记忆悬浮窗位置";
             UISwitch *sw = [UISwitch new];
@@ -2532,6 +2848,22 @@ static void applySystemRefreshRate(void) {
             [self presentViewController:alert animated:YES completion:nil];
         }
     } else if (indexPath.section == 3) {
+        if (indexPath.row == 5) {
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"通知显示时间" message:@"选择消息浮窗保留多长时间" preferredStyle:UIAlertControllerStyleActionSheet];
+            NSArray *titles = @[@"3 秒", @"5 秒", @"8 秒", @"10 秒"];
+            NSArray *values = @[@3, @5, @8, @10];
+
+            for (NSInteger i = 0; i < titles.count; i++) {
+                [alert addAction:[UIAlertAction actionWithTitle:titles[i] style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+                    notificationDuration = [values[i] integerValue];
+                    SavePreferencesAndNotify();
+                    [self.tableView reloadData];
+                }]];
+            }
+            [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+            [self presentViewController:alert animated:YES completion:nil];
+        }
+    } else if (indexPath.section == 4) {
         if (indexPath.row == 2) {
             UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"吸附模式" message:@"选择悬浮窗贴边时的吸附位置" preferredStyle:UIAlertControllerStyleActionSheet];
             NSArray *modes = @[@"自动", @"左侧", @"右侧", @"顶部", @"底部"];
@@ -2545,7 +2877,7 @@ static void applySystemRefreshRate(void) {
             [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
             [self presentViewController:alert animated:YES completion:nil];
         }
-    } else if (indexPath.section == 5) {
+    } else if (indexPath.section == 6) {
         if (indexPath.row == 0) {
             UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"CPU 模式" message:@"选择系统级温控干预级别" preferredStyle:UIAlertControllerStyleActionSheet];
             NSArray *titles = @[@"苹果原生温控", @"模拟低电频率", @"防止温控降频"];
@@ -2559,7 +2891,7 @@ static void applySystemRefreshRate(void) {
             [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
             [self presentViewController:alert animated:YES completion:nil];
         }
-    } else if (indexPath.section == 6) {
+    } else if (indexPath.section == 7) {
         if (indexPath.row == 1) {
             UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"断充温度阈值" message:@"选择电池达到多少度时强制旁路供电" preferredStyle:UIAlertControllerStyleActionSheet];
             NSArray *titles = @[@"35.0°C", @"36.0°C", @"37.0°C", @"38.0°C", @"39.0°C", @"40.0°C", @"41.0°C", @"42.0°C", @"43.0°C"];
@@ -2639,6 +2971,13 @@ static void applySystemRefreshRate(void) {
 - (void)changeSmartDock:(UISwitch *)sw { smartDockEnable = sw.isOn; SavePreferencesAndNotify(); }
 - (void)changeRememberPosition:(UISwitch *)sw { rememberPositionEnable = sw.isOn; SavePreferencesAndNotify(); }
 
+// === V2.8: 通知开关 ===
+- (void)changeNotificationEnable:(UISwitch *)sw { notificationEnable = sw.isOn; SavePreferencesAndNotify(); }
+- (void)changeWechatEnable:(UISwitch *)sw { wechatEnable = sw.isOn; SavePreferencesAndNotify(); }
+- (void)changeQqEnable:(UISwitch *)sw { qqEnable = sw.isOn; SavePreferencesAndNotify(); }
+- (void)changeTimEnable:(UISwitch *)sw { timEnable = sw.isOn; SavePreferencesAndNotify(); }
+- (void)changeHideContentLockScreen:(UISwitch *)sw { hideContentOnLockScreen = sw.isOn; SavePreferencesAndNotify(); }
+
 - (void)changeForce120Hz:(UISwitch *)sw { force120HzEnable = sw.isOn; SavePreferencesAndNotify(); }
 - (void)changeThermalProtection:(UISwitch *)sw { thermalProtectionEnable = sw.isOn; SavePreferencesAndNotify(); }
 
@@ -2668,7 +3007,7 @@ static void applySystemRefreshRate(void) {
 
 @end
 
-#pragma mark - 8. 进程通知与 SpringBoard 状态初始化
+#pragma mark - 9. 进程通知与 SpringBoard 状态初始化
 
 static void onCCNotificationReceived(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
     (void)center;
@@ -2723,7 +3062,7 @@ static void registerV160Observers(void) {
     });
 }
 
-#pragma mark - 9. SpringBoard 侧的核心拦截防线
+#pragma mark - 10. SpringBoard 侧的核心拦截防线
 
 %hook BrightnessSystemClient
 - (BOOL)setProperty:(id)property forKey:(NSString *)key {
@@ -2776,7 +3115,16 @@ static void registerV160Observers(void) {
 }
 %end
 
-#pragma mark - 10. 构造函数入口
+// === V2.8: 通知中枢拦截 ===
+%hook NCNotificationDispatcher
+- (void)insertNotificationRequest:(NCNotificationRequest *)arg1 {
+    %orig;
+    [[SBNotificationManager sharedInstance] handleNewNotification:arg1];
+}
+%end
+
+
+#pragma mark - 11. 构造函数入口
 
 %ctor {
     %init;
