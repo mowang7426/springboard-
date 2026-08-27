@@ -88,7 +88,7 @@ typedef struct {
 @property (nonatomic, strong) UILabel *batteryValueLabel;
 @property (nonatomic, strong) UILabel *batterySubLabel;
 @property (nonatomic, strong) UIView *div2;
-@property (nonatomic, strong) UILabel *tempIconLabel; // 🟢 正向温度计图标
+@property (nonatomic, strong) UILabel *tempIconLabel; // 完全保留你的温度计
 @property (nonatomic, strong) UILabel *tempValueLabel;
 @property (nonatomic, strong) UILabel *tempSubLabel;
 @property (nonatomic, strong) UIView *div3;
@@ -240,7 +240,7 @@ static double getBatteryCurrentInternal(void);
 static BOOL isChargingInternal(void);
 
 static double getSpringBoardCPUUsage(void);
-static double getTotalCPUUsage(void); // 🟢 声明了系统总CPU获取函数
+static double getTotalCPUUsage(void); // 🟢 声明全系统总CPU获取函数
 static double getRealCPUFrequency(double currentCpuUsage);
 static void setHardwareChargingInhibit(BOOL inhibit);
 static NSString *getNetworkType(void);
@@ -248,7 +248,6 @@ static NSString *getNetworkType(void);
 static void SendCPUModeToDaemon(NSInteger mode, BOOL blockDimming, BOOL forceFastCharge) {
     int token;
     if (notify_register_check(NOTIFY_CPU_MODE, &token) == NOTIFY_STATUS_OK) {
-        // Bit 8=防暗屏, Bit 9=强制满血快充
         uint64_t state = (mode & 0xFF) | ((blockDimming ? 1ULL : 0) << 8) | ((forceFastCharge ? 1ULL : 0) << 9);
         notify_set_state(token, state);
         notify_post(NOTIFY_CPU_MODE);
@@ -557,6 +556,7 @@ static BOOL isDeviceOverheated(void) {
     return getBatteryTemperatureInternal() >= 43.0;
 }
 
+// 供悬浮球使用的 SpringBoard 单进程 CPU
 static double getSpringBoardCPUUsage(void) {
     kern_return_t kr;
     thread_array_t thread_list;
@@ -587,7 +587,7 @@ static double getSpringBoardCPUUsage(void) {
     return total_cpu;
 }
 
-// 🟢 获取系统全局物理总 CPU 进程使用率 (仅供详情页显示)
+// 🟢 解决编译报错：恢复全局物理总 CPU 进程数据抓取功能（仅供详情页面显示）
 static double getTotalCPUUsage(void) {
     kern_return_t kr;
     mach_msg_type_number_t count;
@@ -880,7 +880,7 @@ static void checkHighCPU(double cpu) {
 static void updateCPU(void) {
     if (!isEnabled) return;
 
-    // 🟢 依然使用单进程 CPU 负载率给悬浮窗，不影响你原本的监控！
+    // 🟢 保持浮窗依然读取你的 SpringBoard 进程，绝不干扰
     double cpu = getSpringBoardCPUUsage();
     double cpuFreq = getRealCPUFrequency(cpu);
     double fps = [SBCPUFPSHelper sharedInstance].currentFPS;
@@ -940,7 +940,7 @@ static void updateCPU(void) {
             floatingView.statusLabel.textColor = [UIColor systemOrangeColor];
             floatingView.statusDot.backgroundColor = [UIColor systemOrangeColor];
         } else if (forceFastChargeEnable && charging) {
-            floatingView.statusLabel.text = @"🚀 满血快充绕过限制中";
+            floatingView.statusLabel.text = @"🚀 满血快充无视限制中";
             floatingView.statusLabel.textColor = [UIColor systemRedColor];
         }
 
@@ -1217,6 +1217,7 @@ static void applySystemRefreshRate(void) {
         _div2.backgroundColor = [UIColor colorWithWhite:0.0f alpha:0.1f];
         [content addSubview:_div2];
 
+        // 🟢 恢复原生的带色彩的小温度计 Emoji，并通过旋转摆正它（代码原封不动）
         _tempIconLabel = [[UILabel alloc] init];
         _tempIconLabel.text = @"🌡";
         _tempIconLabel.font = [UIFont systemFontOfSize:17];
@@ -1880,7 +1881,7 @@ static void applySystemRefreshRate(void) {
         @"电池当前电量", @"电池设计容量", @"电池实际容量", @"电池当前容量"
     ];
 
-    // 🟢 精准修改：将此处变回系统总 CPU
+    // 🟢 精准修改：详情页只改成系统总 CPU（解决你的报错问题）
     NSArray *rightKeys = @[
         @"设备名称", @"软件版本", @"网络信息", @"内网地址",
         @"实时网速", @"系统总 CPU", @"CPU主频 / FPS", @"内存剩余",
@@ -2047,7 +2048,7 @@ static void applySystemRefreshRate(void) {
     }
     _labelsDict[@"实时网速"].text = [NSString stringWithFormat:@"↑%lluK ↓%lluK", speedUpBytesPerSec / 1024, speedDownBytesPerSec / 1024];
 
-    // 🟢 精准修改：使用 getTotalCPUUsage，让详情页呈现全设备物理总 CPU 负载！
+    // 🟢 精准调用系统总 CPU 函数，彻底解决之前 unused function 的警告报错
     double totalSystemCpu = getTotalCPUUsage();
     _labelsDict[@"系统总 CPU"].text = [NSString stringWithFormat:@"%s %ld核心 %.0f%%", spec.chipName, (long)spec.cores, totalSystemCpu];
 
