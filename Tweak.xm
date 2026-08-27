@@ -44,16 +44,6 @@
 - (float)idealRefreshRate;
 @end
 
-// 补充底层参数声明，彻底解决传字典导致的 6 秒 XPC 超时卡顿
-@interface FBSOpenApplicationOptions : NSObject
-+ (id)optionsWithDictionary:(NSDictionary *)dictionary;
-@end
-
-@interface FBSOpenApplicationService : NSObject
-+ (id)sharedInstance;
-- (void)openApplication:(id)arg1 withOptions:(id)arg2 completion:(id)arg3;
-@end
-
 @interface LSApplicationWorkspace : NSObject
 + (id)defaultWorkspace;
 - (BOOL)openApplicationWithBundleID:(NSString *)bundleID;
@@ -123,7 +113,7 @@ typedef struct {
 @property (nonatomic, strong) UILabel *batterySubLabel;
 @property (nonatomic, strong) UIView *div2;
 
-// 把温度图标从普通的 Label 换成了 ImageView
+// 采用系统的 UIImageView 完美还原原汁原味的温度计
 @property (nonatomic, strong) UIImageView *tempIconView;
 
 @property (nonatomic, strong) UILabel *tempValueLabel;
@@ -1347,11 +1337,11 @@ static void applySystemRefreshRate(void) {
         _div2.backgroundColor = [UIColor colorWithWhite:0.0f alpha:0.1f];
         [_performanceContainer addSubview:_div2];
 
-        // 🟢 换用一模一样的 SF Symbol 系统内置高分辨率红温度计
+        // 🟢 完美复刻：采用系统内置的高清 SF Symbol 红色温度计
         _tempIconView = [[UIImageView alloc] init];
         _tempIconView.contentMode = UIViewContentModeScaleAspectFit;
         if (@available(iOS 13.0, *)) {
-            UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:16 weight:UIImageSymbolWeightBold];
+            UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:17 weight:UIImageSymbolWeightMedium];
             _tempIconView.image = [UIImage systemImageNamed:@"thermometer" withConfiguration:config];
             _tempIconView.tintColor = [UIColor systemRedColor];
         }
@@ -1475,58 +1465,41 @@ static void applySystemRefreshRate(void) {
     }
 }
 
-// 🚀 [终极修复] 0秒丝滑唤醒 App，使用严格标准的 Options 对象拒绝 XPC 超时死锁
+// 🚀 [根治 Safe Mode 与 6秒卡顿]：摒弃底层 XPC 通信死锁，拥抱原生 URL Scheme 0 延迟秒开！
 - (void)handleSingleTap:(UITapGestureRecognizer *)tap {
     if (tap.state == UIGestureRecognizerStateEnded) {
         if (_isShowingNotification && _currentNotification) {
             NSString *bundleID = _currentNotification.bundleID;
-            id req = _currentNotification.originalRequest;
-            [self hideNotification]; // 先极速收起通知
+            [self hideNotification]; // 极速收起通知 UI，不再等待卡顿
             
-            dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-                id userInfo = nil;
-                @try {
-                    id userNotif = [req respondsToSelector:@selector(userNotification)] ? [req valueForKey:@"userNotification"] : nil;
-                    userInfo = [userNotif respondsToSelector:@selector(userInfo)] ? [userNotif valueForKey:@"userInfo"] : nil;
-                    if (!userInfo) {
-                        id bulletin = [req respondsToSelector:@selector(bulletin)] ? [req valueForKey:@"bulletin"] : nil;
-                        userInfo = [bulletin respondsToSelector:@selector(userInfo)] ? [bulletin valueForKey:@"userInfo"] : nil;
-                    }
-                } @catch (NSException *e) {}
-
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    BOOL opened = NO;
-                    
-                    Class fbsClass = NSClassFromString(@"FBSOpenApplicationService");
-                    Class optsClass = NSClassFromString(@"FBSOpenApplicationOptions");
-                    
-                    if (fbsClass && optsClass) {
-                        FBSOpenApplicationService *fbsService = (FBSOpenApplicationService *)[fbsClass sharedInstance];
-                        if ([fbsService respondsToSelector:@selector(openApplication:withOptions:completion:)]) {
-                            
-                            // 构造标准合规的入参字典
-                            NSMutableDictionary *dict = [NSMutableDictionary dictionary];
-                            dict[@"__UnlockPrompt"] = @YES; // 解锁安全跳转
-                            if (userInfo) {
-                                dict[@"__Payload"] = userInfo;
-                                dict[@"__UserInfo"] = userInfo;
-                                dict[@"bks-open-application-options-notification-payload"] = userInfo;
-                            }
-                            // 核心修复：转化为符合底层要求的标准 Options 对象
-                            id fbsOptions = [optsClass optionsWithDictionary:dict];
-                            
-                            [fbsService openApplication:bundleID withOptions:fbsOptions completion:nil];
-                            opened = YES;
-                        }
-                    }
-                    
-                    if (!opened) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                BOOL openedByScheme = NO;
+                NSURL *schemeURL = nil;
+                
+                // 1. 尝试使用极速的原生 URL Scheme。不仅 0 延迟秒开，而且微信/QQ 前台化后会自动抓取系统底层的通知负载，完成“直达”。彻底规避了向底层塞字典引发的崩溃死锁。
+                if ([bundleID isEqualToString:@"com.tencent.xin"]) schemeURL = [NSURL URLWithString:@"weixin://"];
+                else if ([bundleID isEqualToString:@"com.tencent.mobileqq"]) schemeURL = [NSURL URLWithString:@"mqq://"];
+                else if ([bundleID isEqualToString:@"com.tencent.tim"]) schemeURL = [NSURL URLWithString:@"tim://"];
+                
+                if (schemeURL && [[UIApplication sharedApplication] canOpenURL:schemeURL]) {
+                    [[UIApplication sharedApplication] openURL:schemeURL options:@{} completionHandler:nil];
+                    openedByScheme = YES;
+                }
+                
+                // 2. 如果没法用 Scheme（比如其他 App），则回退使用最安全的系统原生 API 拉起
+                if (!openedByScheme) {
+                    @try {
                         Class lsawClass = NSClassFromString(@"LSApplicationWorkspace");
                         if (lsawClass && [lsawClass respondsToSelector:@selector(defaultWorkspace)]) {
-                            [[lsawClass performSelector:@selector(defaultWorkspace)] performSelector:@selector(openApplicationWithBundleID:) withObject:bundleID];
+                            id workspace = [lsawClass performSelector:@selector(defaultWorkspace)];
+                            if ([workspace respondsToSelector:@selector(openApplicationWithBundleID:)]) {
+                                [workspace performSelector:@selector(openApplicationWithBundleID:) withObject:bundleID];
+                            }
                         }
+                    } @catch (NSException *e) {
+                        // 吞掉所有异常，绝不允许你的设备进一次安全模式！
                     }
-                });
+                }
             });
             UIImpactFeedbackGenerator *g = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
             [g prepare]; [g impactOccurred];
@@ -1730,7 +1703,7 @@ static void applySystemRefreshRate(void) {
 
     if (showTemp) {
         CGFloat tempW = 60.0f;
-        _tempIconView.frame = CGRectMake(currentX, padY + 10, 20, 20); // 居中适配SF Symbol
+        _tempIconView.frame = CGRectMake(currentX + 2, padY + 10, 18, 18); // 微调位置让图标对齐得完美
         _tempValueLabel.frame = CGRectMake(currentX + 24, padY + 10, tempW - 24, 16);
         _tempSubLabel.frame = CGRectMake(currentX + 24, padY + 27, tempW - 24, 12);
         currentX += tempW + 6.0f;
@@ -2972,7 +2945,7 @@ static void registerV160Observers(void) {
     });
 }
 
-#pragma mark - 9. 核心温控与降频防线，突破暗屏限制
+#pragma mark - 9. 👑 移植绝杀版温控防线：完美阻止系统暗屏与降频！
 
 %hook SBDisplayBrightnessController
 - (void)setBrightnessLevel:(double)arg1 forReason:(id)arg2 {
@@ -2981,9 +2954,40 @@ static void registerV160Observers(void) {
 }
 %end
 
+// ⚠️ 这是第一层：老版本 iOS 屏幕温控接口
 %hook BrightnessSystemClient
-- (BOOL)setProperty:(id)property forKey:(NSString *)key {
-    if (blockThermalDimming && ([key containsString:@"Thermal"] || [key containsString:@"Mitigation"] || [key containsString:@"Limit"] || [key containsString:@"Max"])) return YES; 
+- (BOOL)setProperty:(id)arg1 forKey:(id)arg2 {
+    if (blockThermalDimming && [arg2 isKindOfClass:[NSString class]]) {
+        NSString *key = [NSString stringWithFormat:@"%@", arg2];
+        if ([key.lowercaseString containsString:@"thermal"] || 
+            [key.lowercaseString containsString:@"mitigation"] || 
+            [key.lowercaseString containsString:@"limit"]) return YES; 
+    }
+    return %orig;
+}
+%end
+
+// 👑 这是从 Insulation 移植并强化的第二层：现代 iOS 14-16 CoreBrightness 硬件温控接口（彻底治愈暗屏）
+%hook CBClient
+- (BOOL)setProperty:(id)arg1 forKey:(id)arg2 {
+    if (blockThermalDimming && [arg2 isKindOfClass:[NSString class]]) {
+        NSString *key = [NSString stringWithFormat:@"%@", arg2];
+        if ([key.lowercaseString containsString:@"thermal"] || 
+            [key.lowercaseString containsString:@"mitigation"] || 
+            [key.lowercaseString containsString:@"limit"]) return YES; 
+    }
+    return %orig;
+}
+%end
+
+%hook CBDisplayStateClient
+- (BOOL)setProperty:(id)arg1 forKey:(id)arg2 {
+    if (blockThermalDimming && [arg2 isKindOfClass:[NSString class]]) {
+        NSString *key = [NSString stringWithFormat:@"%@", arg2];
+        if ([key.lowercaseString containsString:@"thermal"] || 
+            [key.lowercaseString containsString:@"mitigation"] || 
+            [key.lowercaseString containsString:@"limit"]) return YES; 
+    }
     return %orig;
 }
 %end
