@@ -11,9 +11,8 @@ SBCPUPrefs_FRAMEWORKS = UIKit
 SBCPUPrefs_PRIVATE_FRAMEWORKS = Preferences
 SBCPUPrefs_CFLAGS = -fobjc-arc
 
-# 🔴 安装路径
+# 🔴 核心修复3：指定正确的安装路径和主类
 SBCPUPrefs_INSTALL_PATH = /Library/PreferenceBundles
-# 🔴 强制声明主类，防止系统因为找不到代码而隐藏插件
 SBCPUPrefs_PRINCIPAL_CLASS = SBCPUPrefsRootListController
 
 include $(THEOS_MAKE_PATH)/bundle.mk
