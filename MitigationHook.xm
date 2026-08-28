@@ -5,7 +5,7 @@
 #import <mach/mach.h>
 #import <dlfcn.h>
 #import <substrate.h> 
-#import <CoreFoundation/CoreFoundation.h> // 必须引入以支持底层的 CFNumberCreate
+#import <CoreFoundation/CoreFoundation.h> 
 
 #define NOTIFY_CPU_MODE "com.yourname.sbcpufloating.cpumode"
 static const int InsulationUnrestrictedPowerTarget = 65000;
@@ -191,5 +191,4 @@ static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry
         dispatch_resume(timer);
     }
 }
-
 
