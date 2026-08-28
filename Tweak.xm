@@ -83,7 +83,7 @@ typedef struct {
 @property (nonatomic, strong) id originalRequest;
 @end
 
-// 🟢 这里是 SBNotificationManager 的声明，千万别被旧代码覆盖了
+// 🟢 补回丢失的 SBNotificationManager 声明
 @interface SBNotificationManager : NSObject
 + (instancetype)sharedInstance;
 - (void)extractAndHandleRequest:(id)req;
@@ -248,11 +248,12 @@ static BOOL hideContentOnLockScreen = NO;
 static NSInteger notificationDuration = 5;
 static NSMutableArray<SBNotifReq *> *historyNotifications = nil;
 
-// 🟢 函数前置声明，防止编译器报 undeclared identifier
+// 🟢 函数前置声明，防止编译器报 undeclared identifier 和 unused function
 static void applyFloatingAlpha(void);
 static void updateFloatingSize(void);
 static void openDetailView(void);
 static void openSettings(void);
+static void applySystemRefreshRate(void);
 
 #pragma mark - 4. 底层 C 函数实现
 
@@ -402,6 +403,7 @@ static void LoadPreferences(void) {
         } else {
             [[SBCPUFPSHelper sharedInstance] stopMonitoring];
         }
+        applySystemRefreshRate(); // 🟢 补回刷新率应用
         int token;
         if (notify_register_check(NOTIFY_CPU_MODE, &token) == NOTIFY_STATUS_OK) {
             uint64_t state = (insulationCpuMode & 0xFF) | ((blockThermalDimming ? 1ULL : 0) << 8) | ((forceFastChargeEnable ? 1ULL : 0) << 9);
@@ -459,6 +461,7 @@ static void SavePreferencesAndNotify(void) {
     } else {
         [[SBCPUFPSHelper sharedInstance] stopMonitoring];
     }
+    applySystemRefreshRate(); // 🟢 补回刷新率应用
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), kPrefChangedNotification, NULL, NULL, YES);
     
     if ([[NSProcessInfo processInfo].processName isEqualToString:@"SpringBoard"]) {
