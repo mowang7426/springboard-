@@ -44,37 +44,31 @@ static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry
     NSString *propStr = (__bridge NSString *)propertyName;
     NSString *lowerPropStr = propStr.lowercaseString;
     
-    // 🟢 [BUG 5 Fix] 防止暗屏硬件底层拦截，兼容 iOS 14 - 17 所有的底层节点
+    // 🟢 [BUG 5 Fix] 高温暗屏的底层拦截（iOS 14-17 通杀）
     if (blockDimming) {
-        if ([lowerPropStr isEqualToString:@"max-brightness"] ||
-            [lowerPropStr isEqualToString:@"brightness-limit"] ||
-            [lowerPropStr isEqualToString:@"iomfb_brightness_limit"] ||
+        if ([lowerPropStr containsString:@"brightness"] ||
             [lowerPropStr containsString:@"thermalmitigation"] ||
             [lowerPropStr containsString:@"thermallimit"] ||
             [lowerPropStr containsString:@"mitigation"]) {
-            return KERN_SUCCESS; // 直接假装成功，绝对不执行暗屏动作
+            return KERN_SUCCESS; // 直接假装成功，不交给系统底层
         }
     }
 
-    // 🚀 [突破 70% 优化充电] 粉碎系统偷切的降速
     if (forceFastCharge) {
         if ([lowerPropStr containsString:@"chargecurrent"] ||
             [lowerPropStr containsString:@"chargelimit"] ||
             [lowerPropStr containsString:@"maxcharge"] ||
             [lowerPropStr containsString:@"chargerate"]) {
-            // 无论系统下发什么，直接死锁写入 5A/5000mA (5000 毫安时)
             orig_IORegistryEntrySetCFProperty(entry, propertyName, (__bridge CFTypeRef)@(5000));
             return KERN_SUCCESS;
         }
         
         if ([lowerPropStr containsString:@"chargeinhibit"] || [lowerPropStr containsString:@"smartcharge"]) {
-            // 拒绝系统对电池“优化充电”从而导致断流的休眠指令
             orig_IORegistryEntrySetCFProperty(entry, propertyName, kCFBooleanFalse);
             return KERN_SUCCESS;
         }
     }
 
-    // 核心 CPU 降温
     if (mode == 1) { 
         if ([propStr isEqualToString:@"p-state-cap"] || [propStr isEqualToString:@"CPU_Ceiling"] || [propStr isEqualToString:@"CPU_Floor"]) {
             orig_IORegistryEntrySetCFProperty(entry, propertyName, (__bridge CFTypeRef)@(2)); return KERN_SUCCESS; 
@@ -142,9 +136,9 @@ static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry
             if (mode != 0) {
                 id cls = (id)objc_getClass("MitigationController");
                 if (cls) {
-                    id controller = [cls sharedInstance];
+                    id controller = [cls performSelector:@selector(sharedInstance)];
                     if (controller && [controller respondsToSelector:@selector(updateCPU)]) {
-                        [controller updateCPU];
+                        [controller performSelector:@selector(updateCPU)];
                     }
                 }
             }
@@ -152,4 +146,5 @@ static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry
         dispatch_resume(timer);
     }
 }
+
 
