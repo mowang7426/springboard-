@@ -52,28 +52,34 @@ static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry
     NSString *propStr = (__bridge NSString *)propertyName;
     
     if (blockDimming) {
-        NSString *propLower = propStr.lowercaseString;
-        if ([propLower containsString:@"max-brightness"] ||
-            [propLower containsString:@"brightness-limit"] ||
-            [propLower containsString:@"brightness_limit"] ||
-            [propLower containsString:@"thermalmitigation"] ||
-            [propLower containsString:@"thermallimit"]) {
+        if ([propStr containsString:@"max-brightness"] ||
+            [propStr containsString:@"brightness-limit"] ||
+            [propStr containsString:@"IOMFB_brightness_limit"] ||
+            [propStr containsString:@"ThermalMitigation"] ||
+            [propStr containsString:@"ThermalLimit"]) {
             return KERN_SUCCESS; 
         }
     }
 
     // 🚀 [终极满血快充]：彻底突破 iPhone 15 及 iOS 17 的 80% 优化充电与高温降流限制
     if (forceFastCharge) {
-        if ([propStr containsString:@"ChargeCurrent"] ||
-            [propStr containsString:@"ChargeLimit"] ||
-            [propStr containsString:@"MaxChargeCurrent"] ||
-            [propStr containsString:@"ChargeRate"] ||
-            [propStr containsString:@"TargetSOC"] ||           // 🎯 破解 iOS 17+ 80% 充电上限的关键 (Target State of Charge)
-            [propStr containsString:@"BatteryChargeLimit"] ||  // 🎯 iPhone 15 专属 80% 硬件拦截
+        // 🎯 破解 iPhone 15 专属硬件拦截，强制上报 TargetSOC 为 100%
+        if ([propStr containsString:@"ChargeLimit"] ||
+            [propStr containsString:@"TargetSOC"] ||           // Target State of Charge (控制 80% 上限)
+            [propStr containsString:@"BatteryChargeLimit"] ||  // 电池上限
             [propStr containsString:@"MaximumChargeLevel"]) {  
+            int val = 100;
+            CFNumberRef numRef = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &val);
+            kern_return_t res = orig_IORegistryEntrySetCFProperty(entry, propertyName, numRef);
+            CFRelease(numRef);
+            return res;
+        }
 
-            // 对电流使用大数值，对电量限制强制锁定 100%
-            int val = ( [propStr containsString:@"Current"] || [propStr containsString:@"Rate"] ) ? 5000 : 100;
+        // 强势注入最高物理电流阈值
+        if ([propStr containsString:@"ChargeCurrent"] ||
+            [propStr containsString:@"MaxChargeCurrent"] ||
+            [propStr containsString:@"ChargeRate"]) {
+            int val = 5000;
             CFNumberRef numRef = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &val);
             kern_return_t res = orig_IORegistryEntrySetCFProperty(entry, propertyName, numRef);
             CFRelease(numRef);
@@ -199,4 +205,3 @@ static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry
         dispatch_resume(timer);
     }
 }
-
