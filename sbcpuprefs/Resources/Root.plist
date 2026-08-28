@@ -5,7 +5,6 @@
 <dict>
 	<key>items</key>
 	<array>
-		<!-- 总开关 -->
 		<dict>
 			<key>cell</key>
 			<string>PSGroupCell</string>
@@ -28,8 +27,6 @@
 			<key>PostNotification</key>
 			<string>com.yourname.sbcpufloating.prefschanged</string>
 		</dict>
-
-		<!-- 功能介绍区块 -->
 		<dict>
 			<key>cell</key>
 			<string>PSGroupCell</string>
@@ -58,7 +55,7 @@
 			<key>label</key>
 			<string>▣ 通知中心与悬浮聊天</string>
 			<key>footerText</key>
-			<string>游戏或应用中无缝显示微信/QQ消息，点击直达 0 延迟聊天窗口。</string>
+			<string>无缝显示微信/QQ消息，点击直达聊天窗口。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -68,8 +65,6 @@
 			<key>footerText</key>
 			<string>突破系统限制，提供智能温度旁路供电与强力满血快充选项。</string>
 		</dict>
-
-		<!-- 操作说明区块 -->
 		<dict>
 			<key>cell</key>
 			<string>PSGroupCell</string>
@@ -116,7 +111,6 @@
 			<key>value</key>
 			<string>自由移动与边缘吸附</string>
 		</dict>
-		
 		<dict>
 			<key>cell</key>
 			<string>PSGroupCell</string>
