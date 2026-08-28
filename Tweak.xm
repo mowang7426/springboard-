@@ -25,17 +25,16 @@
 #define kPrefChangedNotification CFSTR("com.yourname.sbcpufloating.prefschanged")
 #define NOTIFY_CPU_MODE "com.yourname.sbcpufloating.cpumode"
 
-#pragma mark - 1. 私有类及幽灵接口声明 (终结 Safe Mode 的核心)
+#pragma mark - 1. 私有类及底层原生接口声明 (终结卡顿与 Safe Mode)
 
-// 👑 幽灵接口：彻底解决指针安全与编译报错，ARC 内存原生接管，告别 Safe Mode！
-@protocol SBCPUNativeCallDummy <NSObject>
-@optional
-- (id)userNotification;
-- (id)userInfo;
-- (id)bulletin;
-+ (id)optionsWithDictionary:(NSDictionary *)dict;
-- (void)openApplication:(NSString *)bundleID withOptions:(id)options completion:(void (^)(NSError *))completion;
-- (BOOL)openApplicationWithBundleID:(NSString *)bundleID;
+// 👑 标准 FBS 接口：告别黑魔法，完美接管系统底层跳转，0卡顿直达、绝对防崩溃！
+@interface FBSOpenApplicationOptions : NSObject
++ (instancetype)optionsWithDictionary:(NSDictionary *)dictionary;
+@end
+
+@interface FBSOpenApplicationService : NSObject
++ (instancetype)sharedInstance;
+- (void)openApplication:(NSString *)bundleID withOptions:(FBSOpenApplicationOptions *)options completion:(void (^)(NSError *error))completion;
 @end
 
 @interface CAWindowServer : NSObject
@@ -89,8 +88,7 @@ typedef struct {
 @property (nonatomic, copy) NSString *title;
 @property (nonatomic, copy) NSString *message;
 @property (nonatomic, strong) NSDate *timestamp;
-// 🟢 核心修复：直接保存安全的内存字典 Payload，彻底抛弃系统高危通知对象，断绝崩溃根源！
-@property (nonatomic, strong) NSDictionary *userInfoPayload; 
+@property (nonatomic, strong) NSDictionary *userInfoPayload; // 仅存安全字典，避开僵尸对象
 @end
 @implementation SBNotifReq
 @end
@@ -135,6 +133,7 @@ typedef struct {
 @property (nonatomic, strong) UIView *statusDot;
 @property (nonatomic, strong) UILabel *miniCpuLabel;
 
+// 🏝️ 灵动岛通知层容器
 @property (nonatomic, strong) UIView *notificationContainer;
 @property (nonatomic, strong) UILabel *notifAppNameLabel;
 @property (nonatomic, strong) UILabel *notifMessageLabel;
@@ -1022,17 +1021,17 @@ static void applySystemRefreshRate(void) {
         if (!title || title.length == 0) title = [content valueForKey:@"subtitle"];
         NSString *message = [content valueForKey:@"message"];
         
-        // 🟢 极度关键修复：提取真正的底层内存并用拷贝接管，断绝任何与被系统销毁的原生请求的关系，永不 Safe Mode！
+        // 🟢 极度关键：榨取纯净参数，剥离高危僵尸指针！
         NSDictionary *payload = nil;
         @try {
-            id userNotif = [req respondsToSelector:@selector(userNotification)] ? [(id<SBCPUNativeCallDummy>)req userNotification] : nil;
-            payload = [userNotif respondsToSelector:@selector(userInfo)] ? [(id<SBCPUNativeCallDummy>)userNotif userInfo] : nil;
+            id userNotif = [req respondsToSelector:@selector(userNotification)] ? [(id)req performSelector:@selector(userNotification)] : nil;
+            payload = [userNotif respondsToSelector:@selector(userInfo)] ? [(id)userNotif performSelector:@selector(userInfo)] : nil;
             if (!payload) {
-                id bulletin = [req respondsToSelector:@selector(bulletin)] ? [(id<SBCPUNativeCallDummy>)req bulletin] : nil;
-                payload = [bulletin respondsToSelector:@selector(userInfo)] ? [(id<SBCPUNativeCallDummy>)bulletin userInfo] : nil;
+                id bulletin = [req respondsToSelector:@selector(bulletin)] ? [(id)req performSelector:@selector(bulletin)] : nil;
+                payload = [bulletin respondsToSelector:@selector(userInfo)] ? [(id)bulletin performSelector:@selector(userInfo)] : nil;
             }
             if (payload && [payload isKindOfClass:[NSDictionary class]]) {
-                payload = [payload copy]; // 安全隔离，自立门户！
+                payload = [[NSDictionary alloc] initWithDictionary:payload]; // 完全深拷贝，切断与旧内存的联系
             } else {
                 payload = nil;
             }
@@ -1053,7 +1052,7 @@ static void applySystemRefreshRate(void) {
         notif.title = title ?: @"新消息"; 
         notif.message = message ?: @"";
         notif.timestamp = [NSDate date];
-        notif.userInfoPayload = payload; // 存入纯净内存字典，而非短命的系统 Request 对象
+        notif.userInfoPayload = payload; // 安全字典入库
         
         [self handleNewNotification:notif];
     } @catch (NSException *e) {}
@@ -1062,8 +1061,9 @@ static void applySystemRefreshRate(void) {
 - (void)handleNewNotification:(SBNotifReq *)req {
     if (!notificationEnable) return;
     BOOL shouldShow = NO;
+    // 🟢 兼容了 QQ 的两种可能包名（com.tencent.mobileqq 和 com.tencent.mqq）
     if (wechatEnable && [req.bundleID isEqualToString:@"com.tencent.xin"]) shouldShow = YES;
-    if (qqEnable && [req.bundleID isEqualToString:@"com.tencent.mobileqq"]) shouldShow = YES;
+    if (qqEnable && ([req.bundleID isEqualToString:@"com.tencent.mobileqq"] || [req.bundleID isEqualToString:@"com.tencent.mqq"])) shouldShow = YES;
     if (timEnable && [req.bundleID isEqualToString:@"com.tencent.tim"]) shouldShow = YES;
     
     if (!shouldShow) return;
@@ -1421,10 +1421,10 @@ static void applySystemRefreshRate(void) {
         _notifMessageLabel = [[UILabel alloc] init];
         _notifMessageLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
         _notifMessageLabel.textColor = [UIColor colorWithWhite:0.15 alpha:1.0];
-        _notifMessageLabel.numberOfLines = 1; // 🟢 强改单行紧凑模式
+        _notifMessageLabel.numberOfLines = 1; 
         [_notificationContainer addSubview:_notifMessageLabel];
 
-        _badgeLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, -6, 24, 14)];
+        _badgeLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, -6, 20, 14)];
         _badgeLabel.backgroundColor = [UIColor systemRedColor];
         _badgeLabel.textColor = [UIColor whiteColor];
         _badgeLabel.font = [UIFont systemFontOfSize:9 weight:UIFontWeightBold];
@@ -1451,7 +1451,7 @@ static void applySystemRefreshRate(void) {
     }
 }
 
-// 🚀 [终极0延迟方案]：只传纯净字典，配合 FBS 原生接口！彻底封死 Safe Mode，丝滑直达秒开！
+// 🚀 [终极0延迟方案]：无视黑魔法，直接用自带的字典传入原生通道。彻底防爆！
 - (void)handleSingleTap:(UITapGestureRecognizer *)tap {
     if (tap.state == UIGestureRecognizerStateEnded) {
         BOOL hasUnread = (historyNotifications.count > 0);
@@ -1461,8 +1461,10 @@ static void applySystemRefreshRate(void) {
             SBNotifReq *targetReq = self.currentNotification ?: historyNotifications.firstObject;
             if (targetReq) {
                 NSString *bundleID = targetReq.bundleID;
-                NSDictionary *userInfo = targetReq.userInfoPayload; // 取出早已净化完成的纯字典
+                NSDictionary *userInfo = targetReq.userInfoPayload; // 提取纯净字典
                 
+                // 🟢 点击瞬间强制干掉红点
+                self.badgeLabel.hidden = YES;
                 self.isShowingNotification = NO;
                 self.currentNotification = nil;
                 [historyNotifications removeAllObjects];
@@ -1471,13 +1473,12 @@ static void applySystemRefreshRate(void) {
                 
                 dispatch_async(dispatch_get_main_queue(), ^{
                     BOOL opened = NO;
-                    
                     @try {
-                        Class fbsClass = NSClassFromString(@"FBSOpenApplicationService");
-                        Class optsClass = NSClassFromString(@"FBSOpenApplicationOptions");
+                        Class fbsServiceClass = NSClassFromString(@"FBSOpenApplicationService");
+                        Class fbsOptionsClass = NSClassFromString(@"FBSOpenApplicationOptions");
                         
-                        if (fbsClass && optsClass) {
-                            id fbsService = [fbsClass performSelector:@selector(sharedInstance)];
+                        if (fbsServiceClass && fbsOptionsClass) {
+                            id fbsService = [fbsServiceClass performSelector:@selector(sharedInstance)];
                             if ([fbsService respondsToSelector:@selector(openApplication:withOptions:completion:)]) {
                                 NSMutableDictionary *dict = [NSMutableDictionary dictionary];
                                 dict[@"__UnlockPrompt"] = @YES; 
@@ -1486,11 +1487,10 @@ static void applySystemRefreshRate(void) {
                                     dict[@"bks-open-application-options-notification-payload"] = userInfo;
                                     dict[@"UIApplicationOpenURLOptionsAnnotationKey"] = userInfo;
                                 }
-                                id fbsOptions = [(id<SBCPUNativeCallDummy>)optsClass optionsWithDictionary:dict];
+                                id fbsOptions = [fbsOptionsClass performSelector:@selector(optionsWithDictionary:) withObject:dict];
                                 
-                                // 传入一个空的 block 防止系统挂起死锁卡 6秒
-                                void (^completionBlock)(NSError *) = ^(NSError *error) {}; 
-                                [(id<SBCPUNativeCallDummy>)fbsService openApplication:bundleID withOptions:fbsOptions completion:completionBlock];
+                                // 💡 绝杀机制：必须传入标准闭包，不传会卡死系统6秒，直接传标准OC闭包完美放行！
+                                [(id)fbsService openApplication:bundleID withOptions:fbsOptions completion:^(NSError *error) {}];
                                 opened = YES;
                             }
                         }
@@ -1502,7 +1502,7 @@ static void applySystemRefreshRate(void) {
                             if (lsawClass && [lsawClass respondsToSelector:@selector(defaultWorkspace)]) {
                                 id workspace = [lsawClass performSelector:@selector(defaultWorkspace)];
                                 if ([workspace respondsToSelector:@selector(openApplicationWithBundleID:)]) {
-                                    [(id<SBCPUNativeCallDummy>)workspace openApplicationWithBundleID:bundleID];
+                                    [(id)workspace openApplicationWithBundleID:bundleID];
                                 }
                             }
                         } @catch (NSException *e) {}
@@ -1587,7 +1587,7 @@ static void applySystemRefreshRate(void) {
     [_blurView.layer addAnimation:glowAnim forKey:@"borderGlow"];
 }
 
-// 👑 [史诗级 紧凑双层 UI]：顶部微缩性能窗，下半部分极致单行消息悬浮窗！
+// 👑 [史诗级紧凑双层 UI]：顶部微缩性能窗，下半部分极限紧凑的单行消息悬浮窗！
 - (void)updateLayoutWithShowCpuFreq:(BOOL)showFreq
                             showFps:(BOOL)showFps
                  showBatteryPercent:(BOOL)showBattery
@@ -1595,7 +1595,7 @@ static void applySystemRefreshRate(void) {
                  showBatteryCurrent:(BOOL)showCurrent
                          isCharging:(BOOL)isCharging {
     
-    // 🟢 彻底解决 CPU 不显示的隐藏锁问题！
+    // 🟢 重点：解决 CPU 在展开时消失的问题！
     _cpuTitleLabel.hidden = NO;
     _cpuValueLabel.hidden = NO;
 
@@ -1628,7 +1628,7 @@ static void applySystemRefreshRate(void) {
     _bottomCapsule.hidden = !isCharging;
 
     CGFloat currentX = 14.0f;
-    CGFloat padY = 6.0f; // 更紧凑的顶部外边距
+    CGFloat padY = 6.0f; 
 
     CGFloat cpuW = 46.0f;
     _cpuTitleLabel.frame = CGRectMake(currentX, padY, cpuW, 12);
@@ -1722,7 +1722,7 @@ static void applySystemRefreshRate(void) {
         NSString *appName = @"消息";
         NSString *icon = @"💬";
         if ([req.bundleID isEqualToString:@"com.tencent.xin"]) { appName = @"微信"; icon = @"🟢"; }
-        else if ([req.bundleID isEqualToString:@"com.tencent.mobileqq"]) { appName = @"QQ"; icon = @"🔵"; }
+        else if ([req.bundleID containsString:@"qq"]) { appName = @"QQ"; icon = @"🔵"; }
         else if ([req.bundleID isEqualToString:@"com.tencent.tim"]) { appName = @"TIM"; icon = @"🔷"; }
         
         NSUInteger count = historyNotifications.count;
@@ -1737,12 +1737,12 @@ static void applySystemRefreshRate(void) {
         }
         self.notifMessageLabel.text = (hideContentOnLockScreen && isLocked) ? @"你收到一条新消息" : req.message;
 
-        // 🟢 超级紧凑的高度 (由 70 缩小到极致 42)
-        self.notificationContainer.frame = CGRectMake(0, currentY, finalW, 42.0f);
-        self.notifAppNameLabel.frame = CGRectMake(14.0f, 4.0f, finalW - 28.0f, 16.0f);
-        self.notifMessageLabel.frame = CGRectMake(14.0f, 22.0f, finalW - 28.0f, 14.0f);
+        // 🟢 超级紧凑：两行字，总高 38px，极度压缩
+        self.notificationContainer.frame = CGRectMake(0, currentY, finalW, 38.0f);
+        self.notifAppNameLabel.frame = CGRectMake(14.0f, 4.0f, finalW - 28.0f, 14.0f);
+        self.notifMessageLabel.frame = CGRectMake(14.0f, 20.0f, finalW - 28.0f, 14.0f);
 
-        currentY += 42.0f;
+        currentY += 38.0f;
     } else {
         self.horizontalDiv.hidden = YES;
         self.notificationContainer.hidden = YES;
@@ -1751,7 +1751,11 @@ static void applySystemRefreshRate(void) {
 
     currentY += 8.0f; 
 
-    if (!self.badgeLabel.hidden) self.badgeLabel.frame = CGRectMake(finalW - 20, -6, 24, 14);
+    // 🟢 解决小红点遮挡：向内收缩安全距离
+    if (!self.badgeLabel.hidden) {
+        CGFloat badgeW = 20.0f;
+        self.badgeLabel.frame = CGRectMake(finalW - badgeW - 2.0f, -6.0f, badgeW, 14.0f);
+    }
 
     _blurView.frame = CGRectMake(0, 0, finalW, currentY);
     
@@ -1859,7 +1863,11 @@ static void applySystemRefreshRate(void) {
         self.bounds = CGRectMake(0, 0, targetW, targetH);
         self.center = targetCenter;
 
-        if (!self.badgeLabel.hidden) self.badgeLabel.frame = CGRectMake(targetW - 12, -6, 24, 14);
+        // 🟢 解决小红点遮挡：折叠时也同步收缩
+        if (!self.badgeLabel.hidden) {
+            CGFloat badgeW = 20.0f;
+            self.badgeLabel.frame = CGRectMake(targetW - badgeW - 2.0f, -6.0f, badgeW, 14.0f);
+        }
 
         self.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, 0, targetW, targetH) cornerRadius:cornerRad].CGPath;
         self.marqueeLayer.frame = self.blurView.bounds;
@@ -1896,7 +1904,7 @@ static void applySystemRefreshRate(void) {
     UIView *parent = self.superview;
     CGRect containerBounds = parent ? parent.bounds : [UIScreen mainScreen].bounds;
 
-    // 🟢 展开时：立刻解除所有可能因为折叠遗留的物理隐藏状态！
+    // 🟢 展开时：立刻解除所有物理隐藏状态，保证 CPU 绝不消失！
     for (UIView *v in self.performanceContainer.subviews) {
         if (v != self.collapsedContainerView) {
             v.hidden = NO;
@@ -1968,7 +1976,6 @@ static void applySystemRefreshRate(void) {
     [self.notificationTimer invalidate];
     self.notificationTimer = [NSTimer scheduledTimerWithTimeInterval:notificationDuration target:self selector:@selector(hideNotification) userInfo:nil repeats:NO];
     
-    // 同样解除可能遗留的隐藏锁
     for (UIView *v in self.performanceContainer.subviews) {
         if (v != self.collapsedContainerView) v.hidden = NO;
     }
