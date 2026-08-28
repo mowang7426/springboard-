@@ -11,6 +11,12 @@
 static const int InsulationUnrestrictedPowerTarget = 65000;
 static int gNotifyToken = -1;
 
+@protocol SBCPUMitigationDummy <NSObject>
+@optional
++ (id)sharedInstance;
+- (void)updateCPU;
+@end
+
 typedef mach_port_t io_registry_entry_t;
 extern "C" kern_return_t IORegistryEntrySetCFProperty(io_registry_entry_t entry, CFStringRef propertyName, CFTypeRef property);
 
@@ -35,7 +41,7 @@ static BOOL getRealTimeForceFastCharge() {
     return (getRealTimeState() >> 9) & 1;
 }
 
-// 👑 [绝杀机制]：C语言底层 IOKit 硬件拦截
+// 👑 [绝杀机制]：C语言底层 IOKit 硬件拦截 (采用 CF 级纯净内存管理避免崩溃)
 static kern_return_t (*orig_IORegistryEntrySetCFProperty)(io_registry_entry_t, CFStringRef, CFTypeRef);
 
 static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry, CFStringRef propertyName, CFTypeRef property) {
@@ -58,6 +64,7 @@ static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry
 
     // 🚀 [终极满血快充]：彻底突破 80% 优化充电与高温降流限制
     if (forceFastCharge) {
+        // 强势注入最高物理阈值，采用 CFNumberCreate 防止底层泄漏
         if ([propStr containsString:@"ChargeCurrent"] ||
             [propStr containsString:@"ChargeLimit"] ||
             [propStr containsString:@"MaxChargeCurrent"] ||
@@ -70,6 +77,7 @@ static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry
             return res;
         }
         
+        // 粉碎 iOS 原生的"优化电池充电 (OBC)" 休眠断流机制
         if ([propStr containsString:@"ChargeInhibit"] || 
             [propStr containsString:@"SmartCharge"] || 
             [propStr containsString:@"EnforceDisableOBC"]) {
@@ -178,9 +186,9 @@ static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry
             if (mode != 0) {
                 Class cls = objc_getClass("MitigationController");
                 if (cls && [cls respondsToSelector:@selector(sharedInstance)]) {
-                    id controller = [cls performSelector:@selector(sharedInstance)];
+                    id controller = [(id<SBCPUMitigationDummy>)cls sharedInstance];
                     if (controller && [controller respondsToSelector:@selector(updateCPU)]) {
-                        [controller performSelector:@selector(updateCPU)];
+                        [(id<SBCPUMitigationDummy>)controller updateCPU];
                     }
                 }
             }
