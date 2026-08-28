@@ -35,11 +35,12 @@
 - (id)userNotification;
 - (id)userInfo;
 - (id)bulletin;
+- (id)defaultAction;
+- (id)actionRunner;
+- (void)executeAction:(id)action fromOrigin:(NSString *)origin endpoint:(id)endpoint withParameters:(NSDictionary *)params completion:(id)completion;
 - (BOOL)isUILocked;
 - (void)openApplication:(NSString *)bundleID withOptions:(id)options completion:(id)completion;
 - (BOOL)openApplicationWithBundleID:(NSString *)bundleID;
-// 预声明原生动作引擎
-- (void)executeAction:(id)action fromOrigin:(NSString *)origin endpoint:(id)endpoint withParameters:(NSDictionary *)params completion:(id)completion;
 @end
 
 @interface CAWindowServer : NSObject
@@ -87,15 +88,14 @@ typedef struct {
 @property (nonatomic, strong) CALayer *driverLayer;
 @end
 
-// 🚀 修复2: 纯净存储 ActionRunner，实现0延迟原生跳转并杜绝崩溃
+// 独立的消息数据模型
 @interface SBNotifReq : NSObject
 @property (nonatomic, copy) NSString *bundleID;
 @property (nonatomic, copy) NSString *title;
 @property (nonatomic, copy) NSString *message;
 @property (nonatomic, strong) NSDate *timestamp;
-@property (nonatomic, strong) NSDictionary *userInfoPayload; 
-@property (nonatomic, strong) id defaultAction;
-@property (nonatomic, strong) id actionRunner;
+@property (nonatomic, strong) NSDictionary *userInfoPayload;
+@property (nonatomic, strong) id originalRequest; 
 @end
 @implementation SBNotifReq
 @end
@@ -1048,10 +1048,8 @@ static void applySystemRefreshRate(void) {
         if (!title || title.length == 0) title = [content valueForKey:@"subtitle"];
         NSString *message = [content valueForKey:@"message"];
         
+        // 🟢 极度关键修复：纯安全代码调用，且不定义任何未使用变量，100% 避免编译报错
         NSDictionary *payload = nil;
-        id defAction = nil;
-        id actRunner = nil;
-
         @try {
             id userNotif = [req respondsToSelector:@selector(userNotification)] ? [req performSelector:@selector(userNotification)] : nil;
             id info = [userNotif respondsToSelector:@selector(userInfo)] ? [userNotif performSelector:@selector(userInfo)] : nil;
@@ -1061,14 +1059,6 @@ static void applySystemRefreshRate(void) {
             }
             if (info && [info isKindOfClass:[NSDictionary class]]) {
                 payload = [[NSDictionary alloc] initWithDictionary:info]; 
-            }
-
-            // 👑 安全提取原生底层的深层跳转 Action 和 Runner，拒绝僵尸指针崩溃
-            if ([req respondsToSelector:@selector(defaultAction)]) {
-                defAction = [req performSelector:@selector(defaultAction)];
-                if (defAction && [defAction respondsToSelector:@selector(actionRunner)]) {
-                    actRunner = [defAction performSelector:@selector(actionRunner)];
-                }
             }
         } @catch (NSException *e) {}
 
@@ -1083,13 +1073,12 @@ static void applySystemRefreshRate(void) {
         lastTitle = title; lastMessage = message; lastTime = now;
         
         SBNotifReq *notif = [[SBNotifReq alloc] init];
-        notif.bundleID = [bundleID copy]; 
+        notif.bundleID = bundleID; 
         notif.title = title ?: @"新消息"; 
         notif.message = message ?: @"";
         notif.timestamp = [NSDate date];
         notif.userInfoPayload = payload; 
-        notif.defaultAction = defAction; // 仅存特定操作块，安全释放主对象
-        notif.actionRunner = actRunner;
+        notif.originalRequest = req;
         
         [self handleNewNotification:notif];
     } @catch (NSException *e) {}
@@ -1442,6 +1431,7 @@ static void applySystemRefreshRate(void) {
         _miniCpuLabel.textAlignment = NSTextAlignmentLeft;
         [_collapsedContainerView addSubview:_miniCpuLabel];
         
+        // 🏝️ 极致压缩版双层 UI (高度仅需 38)
         _notificationContainer = [[UIView alloc] initWithFrame:content.bounds];
         _notificationContainer.userInteractionEnabled = NO;
         _notificationContainer.alpha = 0.0;
@@ -1486,21 +1476,16 @@ static void applySystemRefreshRate(void) {
     }
 }
 
-// 🚀 修复2: 0延迟深层链接直达聊天，彻底告别原版卡顿与黑屏，安全断绝僵尸对象
+// 🚀 修复2: 绝对0延迟防卡死，提取系统原生事件引擎直达聊天（规避任何编译警告）
 - (void)handleSingleTap:(UITapGestureRecognizer *)tap {
     if (tap.state == UIGestureRecognizerStateEnded) {
         BOOL hasUnread = (historyNotifications.count > 0);
-        
-        // 有消息时，不论当前是折叠还是展开状态，一律清除红点并直达APP！
-        if (hasUnread || self.isShowingNotification) {
+        BOOL combinedModeVisible = (!self.isCollapsed && hasUnread) || self.isShowingNotification;
+
+        if (combinedModeVisible) {
             SBNotifReq *targetReq = self.currentNotification ?: historyNotifications.firstObject;
             if (targetReq) {
-                NSString *bundleID = [targetReq.bundleID copy];
-                id actRun = targetReq.actionRunner;
-                id defAct = targetReq.defaultAction;
-                NSDictionary *userInfo = targetReq.userInfoPayload;
-                
-                // 【核心红点消灭】瞬间清除 UI 缓存
+                // 🟢 瞬间清除小红点及缓存，彻底隐藏绝不残留！
                 self.badgeLabel.hidden = YES;
                 self.isShowingNotification = NO;
                 self.currentNotification = nil;
@@ -1508,28 +1493,67 @@ static void applySystemRefreshRate(void) {
                 
                 [self collapseToEdgeAnimated:YES];
                 
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    BOOL opened = NO;
-                    // 第一层：最极致0延迟！利用刚保存的 NotificationActionRunner，像原生一样深层呼叫
-                    @try {
-                        if (actRun && defAct && [actRun respondsToSelector:@selector(executeAction:fromOrigin:endpoint:withParameters:completion:)]) {
-                            [actRun executeAction:defAct fromOrigin:@"NCNotificationDestinationBanner" endpoint:nil withParameters:nil completion:nil];
-                            opened = YES;
-                        }
-                    } @catch (NSException *e) {}
+                dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        BOOL opened = NO;
 
-                    // 第二层：兜底安全唤醒 (防止 Action 被清理)
-                    if (!opened) {
+                        // 第一层：神级优化！0延迟！使用系统的 Notification Action Runner 模拟手指点击横幅
                         @try {
-                            id lsawClass = NSClassFromString(@"LSApplicationWorkspace");
-                            if (lsawClass) {
-                                id workspace = [lsawClass performSelector:@selector(defaultWorkspace)];
-                                if ([workspace respondsToSelector:@selector(openApplicationWithBundleID:)]) {
-                                    [workspace performSelector:@selector(openApplicationWithBundleID:) withObject:bundleID];
+                            id rawRequest = targetReq.originalRequest; 
+                            if (rawRequest && [rawRequest respondsToSelector:@selector(defaultAction)]) {
+                                id defaultAction = [rawRequest performSelector:@selector(defaultAction)];
+                                if (defaultAction && [defaultAction respondsToSelector:@selector(actionRunner)]) {
+                                    id runner = [defaultAction performSelector:@selector(actionRunner)];
+                                    if (runner && [runner respondsToSelector:@selector(executeAction:fromOrigin:endpoint:withParameters:completion:)]) {
+                                        // 完美填入 5 个参数的执行，触发系统底层免黑屏直达 APP
+                                        void (^completionBlock)(BOOL) = ^(BOOL success) {};
+                                        [runner executeAction:defaultAction fromOrigin:@"NCNotificationDestinationBanner" endpoint:nil withParameters:nil completion:completionBlock];
+                                        opened = YES;
+                                    }
                                 }
                             }
                         } @catch (NSException *e) {}
-                    }
+
+                        // 第二层：使用 FBS 传入解析好的纯净参数 (无需定义多余变量，避免编译报错)
+                        if (!opened) {
+                            @try {
+                                id fbsServiceClass = NSClassFromString(@"FBSOpenApplicationService");
+                                id fbsOptionsClass = NSClassFromString(@"FBSOpenApplicationOptions");
+                                
+                                if (fbsServiceClass && fbsOptionsClass) {
+                                    id fbsService = [fbsServiceClass performSelector:@selector(sharedInstance)];
+                                    if ([fbsService respondsToSelector:@selector(openApplication:withOptions:completion:)]) {
+                                        NSMutableDictionary *dict = [NSMutableDictionary dictionary];
+                                        dict[@"__UnlockPrompt"] = @YES; 
+                                        if (targetReq.userInfoPayload) {
+                                            dict[@"__Payload"] = targetReq.userInfoPayload;
+                                            dict[@"bks-open-application-options-notification-payload"] = targetReq.userInfoPayload;
+                                            dict[@"UIApplicationOpenURLOptionsAnnotationKey"] = targetReq.userInfoPayload;
+                                        }
+                                        id fbsOptions = [fbsOptionsClass performSelector:@selector(optionsWithDictionary:) withObject:dict];
+                                        
+                                        // 💡 绝杀机制：completion 传空闭包，完美打破卡死等待！
+                                        void (^completionBlock)(id) = ^(id error) {}; 
+                                        [fbsService openApplication:targetReq.bundleID withOptions:fbsOptions completion:completionBlock];
+                                        opened = YES;
+                                    }
+                                }
+                            } @catch (NSException *e) {}
+                        }
+                        
+                        // 第三层：稳定兜底唤醒
+                        if (!opened) {
+                            @try {
+                                id lsawClass = NSClassFromString(@"LSApplicationWorkspace");
+                                if (lsawClass) {
+                                    id workspace = [lsawClass performSelector:@selector(defaultWorkspace)];
+                                    if ([workspace respondsToSelector:@selector(openApplicationWithBundleID:)]) {
+                                        [workspace performSelector:@selector(openApplicationWithBundleID:) withObject:targetReq.bundleID];
+                                    }
+                                }
+                            } @catch (NSException *e) {}
+                        }
+                    });
                 });
                 
                 UIImpactFeedbackGenerator *g = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
@@ -1618,24 +1642,33 @@ static void applySystemRefreshRate(void) {
                  showBatteryCurrent:(BOOL)showCurrent
                          isCharging:(BOOL)isCharging {
     
-    if (self.isCollapsed) return;
+    if (self.isCollapsed && !self.isShowingNotification) return;
 
     BOOL hasUnread = (historyNotifications.count > 0 && !self.isShowingNotification);
     self.badgeLabel.hidden = !hasUnread;
     if (hasUnread) self.badgeLabel.text = [NSString stringWithFormat:@"%lu", (unsigned long)historyNotifications.count];
 
-    // 三大显示逻辑控制
+    // 三大显示逻辑控制，精准定位到底是弹窗还是面板
     BOOL isAutoPop = self.isShowingNotification; 
-    BOOL isManualExpand = !self.isCollapsed && !self.isShowingNotification;
-    BOOL showCombinedMode = isManualExpand && (historyNotifications.count > 0); 
-    BOOL showPerf = isManualExpand; // 自动弹窗时彻底隐藏上方性能板！
+    BOOL wasCollapsed = self.wasCollapsedBeforeNotification;
+    
+    BOOL showPerf = YES;
+    BOOL showNotif = NO;
+    
+    if (isAutoPop) {
+        showNotif = YES;
+        showPerf = !wasCollapsed; // 如果原来是折叠的，自动弹消息时纯净隐藏上方性能板！
+    } else if (!self.isCollapsed) {
+        showPerf = YES; // 手动展开时，肯定有性能面板
+        showNotif = hasUnread; // 有历史消息时显示下面
+    }
 
     self.performanceContainer.hidden = !showPerf;
     self.performanceContainer.alpha = showPerf ? 1.0 : 0.0;
     
     CGFloat currentX = 14.0f;
     CGFloat padY = 6.0f; 
-    CGFloat finalW = 240.0f; // 给一个漂亮的默认宽度
+    CGFloat finalW = 240.0f; 
     CGFloat currentY = padY;
 
     if (showPerf) {
@@ -1723,7 +1756,7 @@ static void applySystemRefreshRate(void) {
 
         finalW = currentX + 10.0f; 
         if (finalW < 40.0f) finalW = 40.0f;
-        if (showCombinedMode && finalW < 240.0f) finalW = 240.0f; 
+        if (showNotif && finalW < 240.0f) finalW = 240.0f; 
         
         currentY = padY + 44.0f; 
         if (isCharging) {
@@ -1735,16 +1768,16 @@ static void applySystemRefreshRate(void) {
             currentY += 14.0f;
         }
     } else {
-        // 专门为只弹通知准备的初始高度
+        // 专门为纯净通知准备的初始高度
         currentY = 4.0f; 
     }
 
-    if (isAutoPop || showCombinedMode) {
+    if (showNotif) {
         self.notificationContainer.hidden = NO;
         self.notificationContainer.alpha = 1.0;
 
-        if (showCombinedMode) {
-            // 手动点开，保留分隔符
+        if (showPerf) {
+            // 手动点开有性能版时，保留横线分隔符
             self.horizontalDiv.hidden = NO;
             self.horizontalDiv.frame = CGRectMake(14.0f, currentY + 4.0f, finalW - 28.0f, 0.5f);
             currentY += 10.0f;
@@ -1784,15 +1817,15 @@ static void applySystemRefreshRate(void) {
         currentY += 8.0f; 
     }
 
-    // 🚀 修复1: 红点坐标超级进化算法！根据屏幕左右动态调转，永不遮挡！
+    // 🚀 修复1: 红点坐标超级进化算法！根据屏幕左右动态调转方向，永不遮挡边缘！
     if (!self.badgeLabel.hidden) {
         UIView *parent = self.superview;
         CGRect containerBounds = parent ? parent.bounds : [UIScreen mainScreen].bounds;
         BOOL isLeft = (self.center.x <= containerBounds.size.width / 2.0f);
         
         CGFloat badgeW = 20.0f;
-        // 如果浮窗吸附在左边 -> 红点紧贴浮窗靠内（右）侧显示 
-        // 如果浮窗吸附在右边 -> 红点紧贴浮窗靠内（左）侧显示
+        // 如果浮窗吸附在左边 -> 红点紧贴浮窗靠内（右侧）显示 
+        // 如果浮窗吸附在右边 -> 红点紧贴浮窗靠内（左侧）显示
         CGFloat targetBadgeX = isLeft ? (finalW - badgeW/2.0f - 4.0f) : (-badgeW/2.0f + 4.0f);
         self.badgeLabel.frame = CGRectMake(targetBadgeX, -6.0f, badgeW, 14.0f);
     }
@@ -1903,7 +1936,7 @@ static void applySystemRefreshRate(void) {
         self.bounds = CGRectMake(0, 0, targetW, targetH);
         self.center = targetCenter;
 
-        // 🚀 确保在折叠状态下，红点也能完美内侧吸附
+        // 🚀 折叠状态下，也保证红点完美内侧反转吸附
         if (!self.badgeLabel.hidden) {
             CGFloat badgeW = 20.0f;
             CGFloat targetBadgeX = isLeft ? (targetW - badgeW/2.0f - 2.0f) : (-badgeW/2.0f + 2.0f);
@@ -2006,10 +2039,14 @@ static void applySystemRefreshRate(void) {
     self.isShowingNotification = YES;
     self.currentNotification = req;
     
+    if (self.isCollapsed) {
+        self.isCollapsed = NO; 
+    }
+    
     [self.inactivityTimer invalidate]; self.inactivityTimer = nil;
     [self.notificationTimer invalidate];
     self.notificationTimer = [NSTimer scheduledTimerWithTimeInterval:notificationDuration target:self selector:@selector(hideNotification) userInfo:nil repeats:NO];
-
+    
     [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionBeginFromCurrentState animations:^{
         updateFloatingSize(); 
     } completion:nil];
@@ -2098,6 +2135,7 @@ static void applySystemRefreshRate(void) {
 #pragma mark - 7. 详细状态 UI 面板与数据绑定
 
 @implementation SBCPUDetailViewController
+
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.view.backgroundColor = [UIColor colorWithWhite:0 alpha:0.25];
@@ -2990,10 +3028,7 @@ static void registerV160Observers(void) {
 
 %hook SBDisplayBrightnessController
 - (void)setBrightnessLevel:(double)arg1 forReason:(id)arg2 {
-    if (blockThermalDimming && [arg2 isKindOfClass:[NSString class]]) {
-        NSString *reason = ((NSString*)arg2).lowercaseString;
-        if ([reason containsString:@"thermal"] || [reason containsString:@"limit"] || [reason containsString:@"mitigation"]) return;
-    }
+    if (blockThermalDimming && [arg2 isKindOfClass:[NSString class]] && ([(NSString*)arg2 containsString:@"Thermal"] || [(NSString*)arg2 containsString:@"Limit"])) return;
     %orig;
 }
 %end
@@ -3001,12 +3036,10 @@ static void registerV160Observers(void) {
 %hook BrightnessSystemClient
 - (BOOL)setProperty:(id)arg1 forKey:(id)arg2 {
     if (blockThermalDimming && [arg2 isKindOfClass:[NSString class]]) {
-        NSString *key = ((NSString *)arg2).lowercaseString;
-        if ([key containsString:@"thermal"] || 
-            [key containsString:@"mitigation"] || 
-            [key containsString:@"limit"] || 
-            [key containsString:@"max-brightness"] ||
-            [key containsString:@"display-brightness-limit"]) return YES; 
+        NSString *key = [NSString stringWithFormat:@"%@", arg2];
+        if ([key.lowercaseString containsString:@"thermal"] || 
+            [key.lowercaseString containsString:@"mitigation"] || 
+            [key.lowercaseString containsString:@"limit"]) return YES; 
     }
     return %orig;
 }
@@ -3015,12 +3048,10 @@ static void registerV160Observers(void) {
 %hook CBClient
 - (BOOL)setProperty:(id)arg1 forKey:(id)arg2 {
     if (blockThermalDimming && [arg2 isKindOfClass:[NSString class]]) {
-        NSString *key = ((NSString *)arg2).lowercaseString;
-        if ([key containsString:@"thermal"] || 
-            [key containsString:@"mitigation"] || 
-            [key containsString:@"limit"] || 
-            [key containsString:@"max-brightness"] ||
-            [key containsString:@"display-brightness-limit"]) return YES; 
+        NSString *key = [NSString stringWithFormat:@"%@", arg2];
+        if ([key.lowercaseString containsString:@"thermal"] || 
+            [key.lowercaseString containsString:@"mitigation"] || 
+            [key.lowercaseString containsString:@"limit"]) return YES; 
     }
     return %orig;
 }
@@ -3029,12 +3060,10 @@ static void registerV160Observers(void) {
 %hook CBDisplayStateClient
 - (BOOL)setProperty:(id)arg1 forKey:(id)arg2 {
     if (blockThermalDimming && [arg2 isKindOfClass:[NSString class]]) {
-        NSString *key = ((NSString *)arg2).lowercaseString;
-        if ([key containsString:@"thermal"] || 
-            [key containsString:@"mitigation"] || 
-            [key containsString:@"limit"] || 
-            [key containsString:@"max-brightness"] ||
-            [key containsString:@"display-brightness-limit"]) return YES; 
+        NSString *key = [NSString stringWithFormat:@"%@", arg2];
+        if ([key.lowercaseString containsString:@"thermal"] || 
+            [key.lowercaseString containsString:@"mitigation"] || 
+            [key.lowercaseString containsString:@"limit"]) return YES; 
     }
     return %orig;
 }
