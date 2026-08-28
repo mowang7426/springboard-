@@ -18,10 +18,10 @@ SBCPUMitigation_CFLAGS = -fobjc-arc
 SBCPUMitigation_FRAMEWORKS = Foundation
 SBCPUMitigation_PRIVATE_FRAMEWORKS = IOKit
 
-# ⚠️ 这一句必须在 SUBPROJECTS 前面，极其重要，否则会安全模式！
+# ⚠️ 注意这里，这句必须在 SUBPROJECTS 之前
 include $(THEOS_MAKE_PATH)/tweak.mk
 
-# 3. 编译系统设置入口面板
+# 🔴 核心修复1：必须加上这两行，编译器才会去打包你的设置页面！
 SUBPROJECTS += sbcpuprefs
 include $(THEOS_MAKE_PATH)/aggregate.mk
 
