@@ -18,6 +18,7 @@ SBCPUMitigation_CFLAGS = -fobjc-arc
 SBCPUMitigation_FRAMEWORKS = Foundation
 SBCPUMitigation_PRIVATE_FRAMEWORKS = IOKit
 
+# ⚠️ 这一句必须在 SUBPROJECTS 前面，极其重要，否则会安全模式！
 include $(THEOS_MAKE_PATH)/tweak.mk
 
 # 3. 编译系统设置入口面板
@@ -26,4 +27,3 @@ include $(THEOS_MAKE_PATH)/aggregate.mk
 
 # 注入桌面、温控、电源总控三大核心进程
 INSTALL_TARGET_PROCESSES = SpringBoard thermalmonitord powerd
-
