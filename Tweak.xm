@@ -1,5 +1,4 @@
 
-#import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <mach/mach.h>
@@ -28,18 +27,14 @@
 
 #pragma mark - 1. 原生接口前置声明 (终结 Safe Mode 和编译错误的核心)
 
-// 👑 直接告诉编译器这是合法的原生调用，告别一切链接错误和安全模式
-@protocol SBCPUDummySafeCalls <NSObject>
-@optional
+// 👑 直接声明原生的 FBS 接口，告别一切黑魔法和安全模式！
+@interface FBSOpenApplicationOptions : NSObject
++ (id)optionsWithDictionary:(id)dictionary;
+@end
+
+@interface FBSOpenApplicationService : NSObject
 + (id)sharedInstance;
-+ (id)defaultWorkspace;
-+ (id)optionsWithDictionary:(NSDictionary *)dict;
-- (id)userNotification;
-- (id)userInfo;
-- (id)bulletin;
-- (BOOL)isUILocked;
-- (void)openApplication:(NSString *)bundleID withOptions:(id)options completion:(id)completion;
-- (BOOL)openApplicationWithBundleID:(NSString *)bundleID;
+- (void)openApplication:(id)bundleID withOptions:(id)options completion:(id)completion;
 @end
 
 @interface CAWindowServer : NSObject
@@ -186,7 +181,7 @@ typedef struct {
 - (void)refreshAllDetailData;
 @end
 
-#pragma mark - 3. 全局状态变量与所有 C 函数前置声明
+#pragma mark - 3. 全局状态变量与所有 C 函数最高级前置声明
 
 static UIWindow *cpuWindow = nil;
 static SBCPUFloatingView *floatingView = nil;
@@ -260,7 +255,7 @@ static BOOL hideContentOnLockScreen = NO;
 static NSInteger notificationDuration = 5;
 static NSMutableArray<SBNotifReq *> *historyNotifications = nil;
 
-// 🟢 这是最强护城墙，保证所有的 C 函数都提前声明，绝不报 implicit 错误！
+// 🟢 极其关键：声明所有 C 函数，保证编译器绝对不报 implicit declaration 错误
 static DeviceSpec MakeDeviceSpec(const char *platform, const char *modelName, const char *chipName, NSInteger cores, double maxFreqMHz, NSInteger designBatteryCapacity);
 static DeviceSpec getDeviceSpec(void);
 static BOOL getBoolPref(CFStringRef key, BOOL defaultVal);
@@ -1055,14 +1050,22 @@ static void applySystemRefreshRate(void) {
         if (!title || title.length == 0) title = [content valueForKey:@"subtitle"];
         NSString *message = [content valueForKey:@"message"];
         
-        // 🟢 极度关键：直接提取纯净参数字典深拷贝，丢弃容易触发安全模式的僵尸系统指针 req！
+        // 🟢 极度关键修复：抛弃强指针，用 valueForKey 安全提取纯净 Payload 字典，切断 Safe Mode 根源！
         NSDictionary *payload = nil;
         @try {
-            id userNotif = [req respondsToSelector:@selector(userNotification)] ? [(id<SBCPUDummySafeCalls>)req userNotification] : nil;
-            id info = [userNotif respondsToSelector:@selector(userInfo)] ? [(id<SBCPUDummySafeCalls>)userNotif userInfo] : nil;
-            if (!info) {
-                id bulletin = [req respondsToSelector:@selector(bulletin)] ? [(id<SBCPUDummySafeCalls>)req bulletin] : nil;
-                info = [bulletin respondsToSelector:@selector(userInfo)] ? [(id<SBCPUDummySafeCalls>)bulletin userInfo] : nil;
+            id userNotif = nil;
+            if ([req respondsToSelector:NSSelectorFromString(@"userNotification")]) {
+                userNotif = [req valueForKey:@"userNotification"];
+            }
+            id info = nil;
+            if (userNotif && [userNotif respondsToSelector:NSSelectorFromString(@"userInfo")]) {
+                info = [userNotif valueForKey:@"userInfo"];
+            }
+            if (!info && [req respondsToSelector:NSSelectorFromString(@"bulletin")]) {
+                id bulletin = [req valueForKey:@"bulletin"];
+                if (bulletin && [bulletin respondsToSelector:NSSelectorFromString(@"userInfo")]) {
+                    info = [bulletin valueForKey:@"userInfo"];
+                }
             }
             if (info && [info isKindOfClass:[NSDictionary class]]) {
                 payload = [[NSDictionary alloc] initWithDictionary:info]; 
@@ -1483,7 +1486,7 @@ static void applySystemRefreshRate(void) {
     }
 }
 
-// 🚀 [终极安全版直达]：完美原生接口接管，传nil闭包阻断卡死！
+// 🚀 [终极安全版直达]：通过 FBS 接口原生实现，利用空闭包直接骗过系统放行，0 延迟秒开！
 - (void)handleSingleTap:(UITapGestureRecognizer *)tap {
     if (tap.state == UIGestureRecognizerStateEnded) {
         BOOL hasUnread = (historyNotifications.count > 0);
@@ -1503,15 +1506,11 @@ static void applySystemRefreshRate(void) {
                 
                 [self collapseToEdgeAnimated:YES];
                 
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    BOOL opened = NO;
-                    @try {
-                        id fbsServiceClass = NSClassFromString(@"FBSOpenApplicationService");
-                        id fbsOptionsClass = NSClassFromString(@"FBSOpenApplicationOptions");
-                        
-                        if (fbsServiceClass && fbsOptionsClass) {
-                            id fbsService = [(id<SBCPUDummySafeCalls>)fbsServiceClass sharedInstance];
-                            if ([fbsService respondsToSelector:@selector(openApplication:withOptions:completion:)]) {
+                dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        BOOL opened = NO;
+                        @try {
+                            if (NSClassFromString(@"FBSOpenApplicationService") && NSClassFromString(@"FBSOpenApplicationOptions")) {
                                 NSMutableDictionary *dict = [NSMutableDictionary dictionary];
                                 dict[@"__UnlockPrompt"] = @YES; 
                                 if (userInfo) {
@@ -1519,26 +1518,30 @@ static void applySystemRefreshRate(void) {
                                     dict[@"bks-open-application-options-notification-payload"] = userInfo;
                                     dict[@"UIApplicationOpenURLOptionsAnnotationKey"] = userInfo;
                                 }
-                                id fbsOptions = [(id<SBCPUDummySafeCalls>)fbsOptionsClass optionsWithDictionary:dict];
+                                id fbsOptions = [NSClassFromString(@"FBSOpenApplicationOptions") optionsWithDictionary:dict];
                                 
-                                // 💡 绝杀机制：completion 传 nil，完美骗过系统放行，实现 0 延迟秒开且绝不崩溃！
-                                [(id<SBCPUDummySafeCalls>)fbsService openApplication:bundleID withOptions:fbsOptions completion:nil];
+                                // 💡 绝杀机制：传入空闭包，完美打破 6 秒死锁，瞬间 0 延迟秒开！
+                                void (^completionBlock)(id) = ^(id error) {}; 
+                                [[NSClassFromString(@"FBSOpenApplicationService") sharedInstance] openApplication:bundleID withOptions:fbsOptions completion:completionBlock];
                                 opened = YES;
                             }
-                        }
-                    } @catch (NSException *e) {}
-                    
-                    if (!opened) {
-                        @try {
-                            id lsawClass = NSClassFromString(@"LSApplicationWorkspace");
-                            if (lsawClass && [lsawClass respondsToSelector:@selector(defaultWorkspace)]) {
-                                id workspace = [(id<SBCPUDummySafeCalls>)lsawClass defaultWorkspace];
-                                if ([workspace respondsToSelector:@selector(openApplicationWithBundleID:)]) {
-                                    [(id<SBCPUDummySafeCalls>)workspace openApplicationWithBundleID:bundleID];
-                                }
-                            }
                         } @catch (NSException *e) {}
-                    }
+                        
+                        if (!opened) {
+                            @try {
+                                Class lsawClass = NSClassFromString(@"LSApplicationWorkspace");
+                                if (lsawClass) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                                    id workspace = [lsawClass performSelector:NSSelectorFromString(@"defaultWorkspace")];
+                                    if ([workspace respondsToSelector:NSSelectorFromString(@"openApplicationWithBundleID:")]) {
+                                        [workspace performSelector:NSSelectorFromString(@"openApplicationWithBundleID:") withObject:bundleID];
+                                    }
+#pragma clang diagnostic pop
+                                }
+                            } @catch (NSException *e) {}
+                        }
+                    });
                 });
                 
                 UIImpactFeedbackGenerator *g = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
@@ -2010,6 +2013,7 @@ static void applySystemRefreshRate(void) {
     [self.notificationTimer invalidate];
     self.notificationTimer = [NSTimer scheduledTimerWithTimeInterval:notificationDuration target:self selector:@selector(hideNotification) userInfo:nil repeats:NO];
     
+    // 同样解除可能遗留的隐藏锁
     for (UIView *v in self.performanceContainer.subviews) {
         if (v != self.collapsedContainerView) v.hidden = NO;
     }
