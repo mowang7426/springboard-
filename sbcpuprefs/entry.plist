@@ -11,8 +11,9 @@
 		<string>PSLinkCell</string>
 		<key>detail</key>
 		<string>SBCPUPrefsRootListController</string>
+		<!-- 🔴 核心修复：直接读取你 GitHub 上的大写 icon.PNG，省去改名的麻烦 -->
 		<key>icon</key>
-		<string>icon.png</string>
+		<string>icon.PNG</string>
 		<key>isController</key>
 		<true/>
 		<key>label</key>
