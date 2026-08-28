@@ -62,6 +62,7 @@ static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry
             [propStr containsString:@"ChargeLimit"] ||
             [propStr containsString:@"MaxChargeCurrent"] ||
             [propStr containsString:@"ChargeRate"]) {
+            
             int val = 5000;
             CFNumberRef numRef = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &val);
             kern_return_t res = orig_IORegistryEntrySetCFProperty(entry, propertyName, numRef);
@@ -187,4 +188,3 @@ static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry
         dispatch_resume(timer);
     }
 }
-
