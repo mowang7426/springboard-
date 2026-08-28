@@ -20,6 +20,10 @@ SBCPUMitigation_PRIVATE_FRAMEWORKS = IOKit
 
 include $(THEOS_MAKE_PATH)/tweak.mk
 
+# 3. 编译系统设置入口面板
+SUBPROJECTS += sbcpuprefs
+include $(THEOS_MAKE_PATH)/aggregate.mk
+
 # 注入桌面、温控、电源总控三大核心进程
 INSTALL_TARGET_PROCESSES = SpringBoard thermalmonitord powerd
 
