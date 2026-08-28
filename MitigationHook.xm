@@ -51,7 +51,6 @@ static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry
     BOOL forceFastCharge = getRealTimeForceFastCharge(); 
     NSString *propStr = (__bridge NSString *)propertyName;
     
-    // 🚀 修复点 5: 扩大 IOKit 中阻挡亮度限制的阈值和正则
     if (blockDimming) {
         NSString *propLower = propStr.lowercaseString;
         if ([propLower containsString:@"max-brightness"] ||
@@ -63,14 +62,18 @@ static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry
         }
     }
 
-    // 🚀 [终极满血快充]：彻底突破 80% 优化充电与高温降流限制
+    // 🚀 [终极满血快充]：彻底突破 iPhone 15 及 iOS 17 的 80% 优化充电与高温降流限制
     if (forceFastCharge) {
         if ([propStr containsString:@"ChargeCurrent"] ||
             [propStr containsString:@"ChargeLimit"] ||
             [propStr containsString:@"MaxChargeCurrent"] ||
-            [propStr containsString:@"ChargeRate"]) {
-            
-            int val = 5000;
+            [propStr containsString:@"ChargeRate"] ||
+            [propStr containsString:@"TargetSOC"] ||           // 🎯 破解 iOS 17+ 80% 充电上限的关键 (Target State of Charge)
+            [propStr containsString:@"BatteryChargeLimit"] ||  // 🎯 iPhone 15 专属 80% 硬件拦截
+            [propStr containsString:@"MaximumChargeLevel"]) {  
+
+            // 对电流使用大数值，对电量限制强制锁定 100%
+            int val = ( [propStr containsString:@"Current"] || [propStr containsString:@"Rate"] ) ? 5000 : 100;
             CFNumberRef numRef = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &val);
             kern_return_t res = orig_IORegistryEntrySetCFProperty(entry, propertyName, numRef);
             CFRelease(numRef);
