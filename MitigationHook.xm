@@ -63,6 +63,7 @@ static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry
 
     // 🚀 [终极满血快充]：彻底突破 80% 优化充电与高温降流限制
     if (forceFastCharge) {
+        // 强势注入最高物理阈值，采用 CFNumberCreate 防止底层泄漏
         if ([propStr containsString:@"ChargeCurrent"] ||
             [propStr containsString:@"ChargeLimit"] ||
             [propStr containsString:@"MaxChargeCurrent"] ||
@@ -75,6 +76,7 @@ static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry
             return res;
         }
         
+        // 粉碎 iOS 原生的"优化电池充电 (OBC)" 休眠断流机制
         if ([propStr containsString:@"ChargeInhibit"] || 
             [propStr containsString:@"SmartCharge"] || 
             [propStr containsString:@"EnforceDisableOBC"]) {
