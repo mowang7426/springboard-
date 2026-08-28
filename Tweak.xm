@@ -1,4 +1,5 @@
 
+#import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <mach/mach.h>
@@ -25,21 +26,21 @@
 #define kPrefChangedNotification CFSTR("com.yourname.sbcpufloating.prefschanged")
 #define NOTIFY_CPU_MODE "com.yourname.sbcpufloating.cpumode"
 
-#pragma mark - 1. 👑 终极免责声明 (全局欺骗编译器，0警告0报错，杜绝一切内存泄漏)
+#pragma mark - 1. 👑 幽灵代理类 (欺骗 Objective-C++ 编译器，杜绝任何报错)
 
 @interface NSObject (SBCPUDummySafeCalls)
 + (id)sharedInstance;
 + (id)defaultWorkspace;
-+ (id)optionsWithDictionary:(id)dict;
++ (id)optionsWithDictionary:(NSDictionary *)dict;
 - (id)userNotification;
 - (id)userInfo;
 - (id)bulletin;
 - (id)defaultAction;
 - (id)actionRunner;
-- (void)executeAction:(id)action fromOrigin:(id)origin endpoint:(id)endpoint withParameters:(id)params completion:(id)completion;
+- (void)executeAction:(id)action fromOrigin:(NSString *)origin endpoint:(id)endpoint withParameters:(NSDictionary *)params completion:(id)completion;
 - (BOOL)isUILocked;
-- (void)openApplication:(id)bundleID withOptions:(id)options completion:(id)completion;
-- (BOOL)openApplicationWithBundleID:(id)bundleID;
+- (void)openApplication:(NSString *)bundleID withOptions:(id)options completion:(id)completion;
+- (BOOL)openApplicationWithBundleID:(NSString *)bundleID;
 @end
 
 @interface CAWindowServer : NSObject
@@ -52,6 +53,11 @@
 - (void)setMinimumRefreshRate:(float)rate;
 - (void)setMaximumRefreshRate:(float)rate;
 - (void)setIdealRefreshRate:(float)rate;
+@end
+
+@interface SBLockScreenManager : NSObject
++ (id)sharedInstance;
+- (BOOL)isUILocked;
 @end
 
 typedef struct {
@@ -89,7 +95,7 @@ typedef struct {
 @property (nonatomic, copy) NSString *message;
 @property (nonatomic, strong) NSDate *timestamp;
 @property (nonatomic, strong) NSDictionary *userInfoPayload; // 仅存安全字典，避开僵尸对象
-@property (nonatomic, strong) id originalRequest; // 缓存备用
+@property (nonatomic, strong) id originalRequest; // 缓存备用，不进行强制类型转换
 @end
 @implementation SBNotifReq
 @end
@@ -173,6 +179,7 @@ typedef struct {
 @interface SBCPUTimePickerController : UITableViewController
 @end
 @interface SBCPUSettingsController : UITableViewController
+- (void)saveConfigs;
 @end
 @interface SBCPUDetailViewController : UIViewController
 @property (nonatomic, strong) UIVisualEffectView *blurEffectView;
@@ -256,6 +263,7 @@ static BOOL hideContentOnLockScreen = NO;
 static NSInteger notificationDuration = 5;
 static NSMutableArray<SBNotifReq *> *historyNotifications = nil;
 
+// 🟢 所有 C 函数严格前置声明
 static DeviceSpec MakeDeviceSpec(const char *platform, const char *modelName, const char *chipName, NSInteger cores, double maxFreqMHz, NSInteger designBatteryCapacity);
 static DeviceSpec getDeviceSpec(void);
 static BOOL getBoolPref(CFStringRef key, BOOL defaultVal);
@@ -1007,9 +1015,9 @@ static void applySystemRefreshRate(void) {
     
     Class serverClass = NSClassFromString(@"CAWindowServer");
     if (serverClass && [serverClass respondsToSelector:@selector(serverIfRunning)]) {
-        CAWindowServer *server = [serverClass serverIfRunning];
+        id server = [serverClass serverIfRunning];
         if (server) {
-            for (CAWindowServerDisplay *display in [server displays]) {
+            for (id display in [server displays]) {
                 if ([display respondsToSelector:@selector(setAllowsVirtualModes:)]) {
                     [display setAllowsVirtualModes:YES];
                 }
@@ -1050,14 +1058,14 @@ static void applySystemRefreshRate(void) {
         if (!title || title.length == 0) title = [content valueForKey:@"subtitle"];
         NSString *message = [content valueForKey:@"message"];
         
-        // 🟢 极度关键修复：通过合法 Category 代理类抛去指针报错，绝对安全提取字典
+        // 🟢 极度关键修复：纯安全代码调用，不使用强制括号转换
         NSDictionary *payload = nil;
         @try {
-            id userNotif = [req respondsToSelector:@selector(userNotification)] ? [(id)req userNotification] : nil;
-            id info = [userNotif respondsToSelector:@selector(userInfo)] ? [(id)userNotif userInfo] : nil;
+            id userNotif = [req respondsToSelector:@selector(userNotification)] ? [req performSelector:@selector(userNotification)] : nil;
+            id info = [userNotif respondsToSelector:@selector(userInfo)] ? [userNotif performSelector:@selector(userInfo)] : nil;
             if (!info) {
-                id bulletin = [req respondsToSelector:@selector(bulletin)] ? [(id)req bulletin] : nil;
-                info = [bulletin respondsToSelector:@selector(userInfo)] ? [(id)bulletin userInfo] : nil;
+                id bulletin = [req respondsToSelector:@selector(bulletin)] ? [req performSelector:@selector(bulletin)] : nil;
+                info = [bulletin respondsToSelector:@selector(userInfo)] ? [bulletin performSelector:@selector(userInfo)] : nil;
             }
             if (info && [info isKindOfClass:[NSDictionary class]]) {
                 payload = [[NSDictionary alloc] initWithDictionary:info]; 
@@ -1089,7 +1097,6 @@ static void applySystemRefreshRate(void) {
 - (void)handleNewNotification:(SBNotifReq *)req {
     if (!notificationEnable) return;
     BOOL shouldShow = NO;
-    // 🟢 完美兼容所有版 QQ
     if (wechatEnable && [req.bundleID isEqualToString:@"com.tencent.xin"]) shouldShow = YES;
     if (qqEnable && [req.bundleID.lowercaseString containsString:@"qq"]) shouldShow = YES;
     if (timEnable && [req.bundleID isEqualToString:@"com.tencent.tim"]) shouldShow = YES;
@@ -1479,7 +1486,7 @@ static void applySystemRefreshRate(void) {
     }
 }
 
-// 🚀 [终极安全0延迟方案]：无视一切警告！直接利用 FBS 协议免除系统卡顿，0秒绝杀开屏！
+// 🚀 [绝对0延迟防卡死] 抛弃括号强转，使用安全接口调用
 - (void)handleSingleTap:(UITapGestureRecognizer *)tap {
     if (tap.state == UIGestureRecognizerStateEnded) {
         BOOL hasUnread = (historyNotifications.count > 0);
@@ -1504,28 +1511,30 @@ static void applySystemRefreshRate(void) {
                     dispatch_async(dispatch_get_main_queue(), ^{
                         BOOL opened = NO;
 
-                        // 第一层：尝试用系统的 Notification Action Runner 模拟点击（最原生）
+                        // 第一层：尝试用系统的 Notification Action Runner 模拟点击
                         @try {
                             if (rawRequest && [rawRequest respondsToSelector:@selector(defaultAction)]) {
-                                id defaultAction = [(id)rawRequest defaultAction];
+                                id defaultAction = [rawRequest performSelector:@selector(defaultAction)];
                                 if (defaultAction && [defaultAction respondsToSelector:@selector(actionRunner)]) {
-                                    id runner = [(id)defaultAction actionRunner];
+                                    id runner = [defaultAction performSelector:@selector(actionRunner)];
                                     if (runner && [runner respondsToSelector:@selector(executeAction:fromOrigin:endpoint:withParameters:completion:)]) {
-                                        [(id)runner executeAction:defaultAction fromOrigin:@"NCNotificationDestinationBanner" endpoint:nil withParameters:nil completion:nil];
+                                        [runner performSelector:@selector(executeAction:fromOrigin:endpoint:withParameters:completion:) 
+                                                     withObject:defaultAction 
+                                                     withObject:@"NCNotificationDestinationBanner"];
                                         opened = YES;
                                     }
                                 }
                             }
                         } @catch (NSException *e) {}
 
-                        // 第二层：使用 FBS 传入解析好的纯净参数（极速，且绝无安全模式风险）
+                        // 第二层：使用 FBS 传入解析好的纯净参数
                         if (!opened) {
                             @try {
-                                Class fbsServiceClass = NSClassFromString(@"FBSOpenApplicationService");
-                                Class fbsOptionsClass = NSClassFromString(@"FBSOpenApplicationOptions");
+                                id fbsServiceClass = NSClassFromString(@"FBSOpenApplicationService");
+                                id fbsOptionsClass = NSClassFromString(@"FBSOpenApplicationOptions");
                                 
                                 if (fbsServiceClass && fbsOptionsClass) {
-                                    id fbsService = [(id)fbsServiceClass sharedInstance];
+                                    id fbsService = [fbsServiceClass performSelector:@selector(sharedInstance)];
                                     if ([fbsService respondsToSelector:@selector(openApplication:withOptions:completion:)]) {
                                         NSMutableDictionary *dict = [NSMutableDictionary dictionary];
                                         dict[@"__UnlockPrompt"] = @YES; 
@@ -1534,24 +1543,25 @@ static void applySystemRefreshRate(void) {
                                             dict[@"bks-open-application-options-notification-payload"] = userInfo;
                                             dict[@"UIApplicationOpenURLOptionsAnnotationKey"] = userInfo;
                                         }
-                                        id fbsOptions = [(id)fbsOptionsClass optionsWithDictionary:dict];
+                                        id fbsOptions = [fbsOptionsClass performSelector:@selector(optionsWithDictionary:) withObject:dict];
                                         
                                         // 💡 绝杀机制：completion 传空闭包，完美打破 6 秒死锁等待！
-                                        [(id)fbsService openApplication:bundleID withOptions:fbsOptions completion:nil];
+                                        void (^completionBlock)(id) = ^(id error) {}; 
+                                        [fbsService openApplication:bundleID withOptions:fbsOptions completion:completionBlock];
                                         opened = YES;
                                     }
                                 }
                             } @catch (NSException *e) {}
                         }
                         
-                        // 兜底层：稳定但无 Payload
+                        // 第三层：稳定兜底
                         if (!opened) {
                             @try {
-                                Class lsawClass = NSClassFromString(@"LSApplicationWorkspace");
+                                id lsawClass = NSClassFromString(@"LSApplicationWorkspace");
                                 if (lsawClass) {
-                                    id workspace = [(id)lsawClass defaultWorkspace];
+                                    id workspace = [lsawClass performSelector:@selector(defaultWorkspace)];
                                     if ([workspace respondsToSelector:@selector(openApplicationWithBundleID:)]) {
-                                        [(id)workspace openApplicationWithBundleID:bundleID];
+                                        [workspace performSelector:@selector(openApplicationWithBundleID:) withObject:bundleID];
                                     }
                                 }
                             } @catch (NSException *e) {}
@@ -1782,9 +1792,9 @@ static void applySystemRefreshRate(void) {
         BOOL isLocked = NO;
         Class lockClass = NSClassFromString(@"SBLockScreenManager");
         if (lockClass && [lockClass respondsToSelector:@selector(sharedInstance)]) {
-            id mgr = [(id)lockClass sharedInstance];
+            id mgr = [lockClass performSelector:@selector(sharedInstance)];
             if ([mgr respondsToSelector:@selector(isUILocked)]) {
-                isLocked = [(id)mgr isUILocked];
+                isLocked = (BOOL)[mgr performSelector:@selector(isUILocked)];
             }
         }
         self.notifMessageLabel.text = (hideContentOnLockScreen && isLocked) ? @"你收到一条新消息" : req.message;
@@ -2033,7 +2043,7 @@ static void applySystemRefreshRate(void) {
     }
 
     [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionBeginFromCurrentState animations:^{
-        [self updateFloatingSize]; 
+        updateFloatingSize(); 
     } completion:nil];
 }
 
@@ -2052,7 +2062,7 @@ static void applySystemRefreshRate(void) {
     } else {
         [self resetInactivityTimer];
         [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionBeginFromCurrentState animations:^{
-            [self updateFloatingSize]; 
+            updateFloatingSize(); 
         } completion:^(BOOL finished) {
             [self resetInactivityTimer];
         }];
@@ -2931,9 +2941,18 @@ static void applySystemRefreshRate(void) {
 }
 
 - (void)saveConfigs { SavePreferencesAndNotify(); }
-- (void)changeScaleSlider:(UISlider *)s { floatingScale = s.value; [self performSelector:@selector(saveConfigs) withObject:nil afterDelay:0.5]; }
-- (void)changeFontSlider:(UISlider *)s { floatingFontSize = s.value; [self performSelector:@selector(saveConfigs) withObject:nil afterDelay:0.5]; }
-- (void)changeCornerRadiusSlider:(UISlider *)s { floatingCornerRadius = s.value; [self performSelector:@selector(saveConfigs) withObject:nil afterDelay:0.5]; }
+- (void)changeScaleSlider:(UISlider *)s { 
+    floatingScale = s.value; 
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ [self saveConfigs]; });
+}
+- (void)changeFontSlider:(UISlider *)s { 
+    floatingFontSize = s.value; 
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ [self saveConfigs]; });
+}
+- (void)changeCornerRadiusSlider:(UISlider *)s { 
+    floatingCornerRadius = s.value; 
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ [self saveConfigs]; });
+}
 
 // UI Switch Actions
 - (void)changeAutoCollapse:(UISwitch *)sw { autoCollapseEnable = sw.isOn; SavePreferencesAndNotify(); }
