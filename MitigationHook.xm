@@ -11,7 +11,6 @@
 static const int InsulationUnrestrictedPowerTarget = 65000;
 static int gNotifyToken = -1;
 
-// 👑 无比纯净的安全调用协议，告别内存 leak！
 @interface NSObject (SBCPUMitigationDummy)
 + (id)sharedInstance;
 - (void)updateCPU;
@@ -182,10 +181,10 @@ static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry
         dispatch_source_set_event_handler(timer, ^{
             NSInteger mode = getRealTimeMitigationMode();
             if (mode != 0) {
-                Class cls = objc_getClass("MitigationController");
+                id cls = (id)objc_getClass("MitigationController");
                 if (cls) {
                     id controller = [cls sharedInstance];
-                    if (controller) {
+                    if (controller && [controller respondsToSelector:@selector(updateCPU)]) {
                         [controller updateCPU];
                     }
                 }
