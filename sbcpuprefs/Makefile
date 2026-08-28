@@ -9,8 +9,8 @@ BUNDLE_NAME = SBCPUPrefs
 SBCPUPrefs_FILES = SBCPUPrefsRootListController.m
 SBCPUPrefs_FRAMEWORKS = UIKit
 SBCPUPrefs_PRIVATE_FRAMEWORKS = Preferences
-SBCPUPrefs_INSTALL_PATH = /Library/PreferenceBundles
 SBCPUPrefs_CFLAGS = -fobjc-arc
 
+# 去掉了硬编码的安装路径，让 RootHide/Rootless Theos 自动决定存放位置
 include $(THEOS_MAKE_PATH)/bundle.mk
 
