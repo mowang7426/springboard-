@@ -1,4 +1,5 @@
 
+#import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <mach/mach.h>
@@ -27,8 +28,9 @@
 
 #pragma mark - 1. 原生接口前置声明 (终结 Safe Mode 和编译错误的核心)
 
-// 👑 直接告诉编译器这是合法的原生调用，告别 objc_msgSend 链接错误
-@interface NSObject (SBCPUFloatingNativeCalls)
+// 👑 直接告诉编译器这是合法的原生调用，告别一切链接错误和安全模式
+@protocol SBCPUDummySafeCalls <NSObject>
+@optional
 + (id)sharedInstance;
 + (id)defaultWorkspace;
 + (id)optionsWithDictionary:(NSDictionary *)dict;
@@ -184,7 +186,7 @@ typedef struct {
 - (void)refreshAllDetailData;
 @end
 
-#pragma mark - 3. 全局状态变量与 C 函数前置声明
+#pragma mark - 3. 全局状态变量与所有 C 函数前置声明
 
 static UIWindow *cpuWindow = nil;
 static SBCPUFloatingView *floatingView = nil;
@@ -258,11 +260,40 @@ static BOOL hideContentOnLockScreen = NO;
 static NSInteger notificationDuration = 5;
 static NSMutableArray<SBNotifReq *> *historyNotifications = nil;
 
+// 🟢 这是最强护城墙，保证所有的 C 函数都提前声明，绝不报 implicit 错误！
+static DeviceSpec MakeDeviceSpec(const char *platform, const char *modelName, const char *chipName, NSInteger cores, double maxFreqMHz, NSInteger designBatteryCapacity);
+static DeviceSpec getDeviceSpec(void);
+static BOOL getBoolPref(CFStringRef key, BOOL defaultVal);
+static float getFloatPref(CFStringRef key, float defaultVal);
+static NSInteger getIntPref(CFStringRef key, NSInteger defaultVal);
+static void setBoolPref(CFStringRef key, BOOL value);
+static void setFloatPref(CFStringRef key, float value);
+static void setIntPref(CFStringRef key, NSInteger value);
+static void applyVisibility(void);
 static void applyFloatingAlpha(void);
+static void applySystemRefreshRate(void);
+static void LoadPreferences(void);
+static void SavePreferencesAndNotify(void);
+static void setHardwareChargingInhibit(BOOL inhibit);
+static void setForceFastChargeOverride(BOOL force);
+static NSString *getNetworkType(void);
+static NSDictionary *getRealBatteryDetails(void);
+static double getBatteryTemperatureInternal(void);
+static double getBatteryCurrentInternal(void);
+static BOOL isChargingInternal(void);
+static BOOL isDeviceOverheated(void);
+static double getSpringBoardCPUUsage(void);
+static double getTotalCPUUsage(void);
+static double getRealCPUFrequency(double currentCpuUsage);
+static UIWindowScene *getWindowScene(void);
+static UIInterfaceOrientation getActiveInterfaceOrientation(void);
+static void clampAndPositionFloatingView(CGPoint targetCenter, BOOL animate);
 static void updateFloatingSize(void);
+static void createCPUWindow(void);
 static void openDetailView(void);
 static void openSettings(void);
-static void applySystemRefreshRate(void);
+static void checkHighCPU(double cpu);
+static void updateCPU(void);
 
 #pragma mark - 4. 底层 C 函数实现
 
@@ -1452,7 +1483,7 @@ static void applySystemRefreshRate(void) {
     }
 }
 
-// 🚀 [绝对0延迟原生版] 强调用标准 FBS 接口，并传递纯净 nil 闭包，完美骗过系统防卡死
+// 🚀 [终极安全版直达]：完美原生接口接管，传nil闭包阻断卡死！
 - (void)handleSingleTap:(UITapGestureRecognizer *)tap {
     if (tap.state == UIGestureRecognizerStateEnded) {
         BOOL hasUnread = (historyNotifications.count > 0);
@@ -1462,7 +1493,7 @@ static void applySystemRefreshRate(void) {
             SBNotifReq *targetReq = self.currentNotification ?: historyNotifications.firstObject;
             if (targetReq) {
                 NSString *bundleID = targetReq.bundleID;
-                NSDictionary *userInfo = targetReq.userInfoPayload; // 提取已经安全的字典
+                NSDictionary *userInfo = targetReq.userInfoPayload; 
                 
                 // 🟢 瞬间清除小红点及缓存，彻底隐藏绝不残留！
                 self.badgeLabel.hidden = YES;
@@ -1475,8 +1506,8 @@ static void applySystemRefreshRate(void) {
                 dispatch_async(dispatch_get_main_queue(), ^{
                     BOOL opened = NO;
                     @try {
-                        Class fbsServiceClass = NSClassFromString(@"FBSOpenApplicationService");
-                        Class fbsOptionsClass = NSClassFromString(@"FBSOpenApplicationOptions");
+                        id fbsServiceClass = NSClassFromString(@"FBSOpenApplicationService");
+                        id fbsOptionsClass = NSClassFromString(@"FBSOpenApplicationOptions");
                         
                         if (fbsServiceClass && fbsOptionsClass) {
                             id fbsService = [(id<SBCPUDummySafeCalls>)fbsServiceClass sharedInstance];
@@ -1490,7 +1521,7 @@ static void applySystemRefreshRate(void) {
                                 }
                                 id fbsOptions = [(id<SBCPUDummySafeCalls>)fbsOptionsClass optionsWithDictionary:dict];
                                 
-                                // 💡 绝杀机制：completion 传 nil，完美骗过系统直接放行，实现 0 延迟秒开且绝不崩溃！
+                                // 💡 绝杀机制：completion 传 nil，完美骗过系统放行，实现 0 延迟秒开且绝不崩溃！
                                 [(id<SBCPUDummySafeCalls>)fbsService openApplication:bundleID withOptions:fbsOptions completion:nil];
                                 opened = YES;
                             }
@@ -1499,7 +1530,7 @@ static void applySystemRefreshRate(void) {
                     
                     if (!opened) {
                         @try {
-                            Class lsawClass = NSClassFromString(@"LSApplicationWorkspace");
+                            id lsawClass = NSClassFromString(@"LSApplicationWorkspace");
                             if (lsawClass && [lsawClass respondsToSelector:@selector(defaultWorkspace)]) {
                                 id workspace = [(id<SBCPUDummySafeCalls>)lsawClass defaultWorkspace];
                                 if ([workspace respondsToSelector:@selector(openApplicationWithBundleID:)]) {
@@ -1588,7 +1619,7 @@ static void applySystemRefreshRate(void) {
     [_blurView.layer addAnimation:glowAnim forKey:@"borderGlow"];
 }
 
-// 👑 [史诗级 紧凑双层 UI]：顶部微缩性能窗，下半部分极限紧凑的单行消息悬浮窗！
+// 👑 [史诗级 UI 进化]：上下分层排布，完美修复一切隐藏和遮挡逻辑！
 - (void)updateLayoutWithShowCpuFreq:(BOOL)showFreq
                             showFps:(BOOL)showFps
                  showBatteryPercent:(BOOL)showBattery
@@ -1596,10 +1627,6 @@ static void applySystemRefreshRate(void) {
                  showBatteryCurrent:(BOOL)showCurrent
                          isCharging:(BOOL)isCharging {
     
-    // 🟢 解决 Bug：彻底解除所有物理隐藏锁，保证 CPU 回归！
-    _cpuTitleLabel.hidden = NO;
-    _cpuValueLabel.hidden = NO;
-
     BOOL hasUnread = (historyNotifications.count > 0 && !self.isShowingNotification);
     self.badgeLabel.hidden = !hasUnread;
     if (hasUnread) self.badgeLabel.text = [NSString stringWithFormat:@"%lu", (unsigned long)historyNotifications.count];
@@ -1610,6 +1637,9 @@ static void applySystemRefreshRate(void) {
 
     self.performanceContainer.hidden = NO;
     self.performanceContainer.alpha = 1.0;
+
+    _cpuTitleLabel.hidden = NO;
+    _cpuValueLabel.hidden = NO;
 
     _cpuFreqLabel.hidden = !showFreq;
     _fpsTitleLabel.hidden = !showFps;
@@ -1734,7 +1764,10 @@ static void applySystemRefreshRate(void) {
         BOOL isLocked = NO;
         Class lockClass = NSClassFromString(@"SBLockScreenManager");
         if (lockClass && [lockClass respondsToSelector:@selector(sharedInstance)]) {
-            isLocked = [[lockClass performSelector:@selector(sharedInstance)] performSelector:@selector(isUILocked)] != nil;
+            SBLockScreenManager *mgr = [lockClass sharedInstance];
+            if ([mgr respondsToSelector:@selector(isUILocked)]) {
+                isLocked = [mgr isUILocked];
+            }
         }
         self.notifMessageLabel.text = (hideContentOnLockScreen && isLocked) ? @"你收到一条新消息" : req.message;
 
@@ -1905,7 +1938,7 @@ static void applySystemRefreshRate(void) {
     UIView *parent = self.superview;
     CGRect containerBounds = parent ? parent.bounds : [UIScreen mainScreen].bounds;
 
-    // 🟢 展开时：立刻解除所有可能被隐藏的锁定，满血显示所有数据
+    // 🟢 展开时：立刻解除所有物理隐藏状态，保证 CPU 绝不消失！
     for (UIView *v in self.performanceContainer.subviews) {
         if (v != self.collapsedContainerView) {
             v.hidden = NO;
@@ -2376,7 +2409,7 @@ static void applySystemRefreshRate(void) {
     [super viewWillTransitionToSize:size withTransitionCoordinator:coordinator];
     [coordinator animateAlongsideTransition:^(id<UIViewControllerTransitionCoordinatorContext> context) {
         (void)context;
-        if (floatingView) updateFloatingSize();
+        if (floatingView) [floatingView performSelector:@selector(updateFloatingSize)];
     } completion:nil];
 }
 
@@ -2491,13 +2524,13 @@ static void applySystemRefreshRate(void) {
     if (section == 0) return 4; 
     if (section == 1) return 3;
     if (section == 2) return 5;
-    if (section == 3) return 6; 
+    if (section == 3) return 6; // 通知管理
     if (section == 4) return 3;
     if (section == 5) return 2;
     if (section == 6) return 5;
     if (section == 7) return 3; 
     if (section == 8) return 6;
-    if (section == 9) return 5; 
+    if (section == 9) return 5; // 📖 功能说明行数
     return 0;
 }
 
@@ -2520,6 +2553,7 @@ static void applySystemRefreshRate(void) {
     (void)tableView;
     UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:nil];
 
+    // 🟢 专属功能说明渲染区
     if (indexPath.section == 9) {
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
         cell.textLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
