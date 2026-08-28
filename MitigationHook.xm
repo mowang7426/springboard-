@@ -5,6 +5,7 @@
 #import <mach/mach.h>
 #import <dlfcn.h>
 #import <substrate.h> 
+#import <CoreFoundation/CoreFoundation.h> // 必须引入以支持底层的 CFNumberCreate
 
 #define NOTIFY_CPU_MODE "com.yourname.sbcpufloating.cpumode"
 static const int InsulationUnrestrictedPowerTarget = 65000;
@@ -34,7 +35,7 @@ static BOOL getRealTimeForceFastCharge() {
     return (getRealTimeState() >> 9) & 1;
 }
 
-// 👑 [绝杀机制]：C语言底层 IOKit 硬件拦截
+// 👑 [绝杀机制]：C语言底层 IOKit 硬件拦截 (采用 CF 级纯净内存管理避免崩溃)
 static kern_return_t (*orig_IORegistryEntrySetCFProperty)(io_registry_entry_t, CFStringRef, CFTypeRef);
 
 static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry, CFStringRef propertyName, CFTypeRef property) {
@@ -62,28 +63,39 @@ static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry
             [propStr containsString:@"ChargeLimit"] ||
             [propStr containsString:@"MaxChargeCurrent"] ||
             [propStr containsString:@"ChargeRate"]) {
-            // 强势注入最高物理阈值，无视 80% 电量限流壁垒
-            orig_IORegistryEntrySetCFProperty(entry, propertyName, (__bridge CFTypeRef)@(5000));
-            return KERN_SUCCESS;
+            
+            // 强势注入最高物理阈值，采用 CFNumberCreate 防止底层泄漏
+            int val = 5000;
+            CFNumberRef numRef = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &val);
+            kern_return_t res = orig_IORegistryEntrySetCFProperty(entry, propertyName, numRef);
+            CFRelease(numRef);
+            return res;
         }
         
         // 粉碎 iOS 原生的"优化电池充电 (OBC)" 休眠断流机制
-        if ([propStr containsString:@"ChargeInhibit"] || [propStr containsString:@"SmartCharge"] || [propStr containsString:@"EnforceDisableOBC"]) {
-            orig_IORegistryEntrySetCFProperty(entry, propertyName, kCFBooleanFalse);
-            return KERN_SUCCESS;
+        if ([propStr containsString:@"ChargeInhibit"] || 
+            [propStr containsString:@"SmartCharge"] || 
+            [propStr containsString:@"EnforceDisableOBC"]) {
+            return orig_IORegistryEntrySetCFProperty(entry, propertyName, kCFBooleanFalse);
         }
     }
 
     if (mode == 1) { 
         if ([propStr isEqualToString:@"p-state-cap"] || [propStr isEqualToString:@"CPU_Ceiling"] || [propStr isEqualToString:@"CPU_Floor"]) {
-            orig_IORegistryEntrySetCFProperty(entry, propertyName, (__bridge CFTypeRef)@(2));
-            return KERN_SUCCESS; 
+            int val = 2;
+            CFNumberRef numRef = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &val);
+            kern_return_t res = orig_IORegistryEntrySetCFProperty(entry, propertyName, numRef);
+            CFRelease(numRef);
+            return res;
         }
     } 
     else if (mode == 2) { 
         if ([propStr isEqualToString:@"p-state-cap"] || [propStr isEqualToString:@"CPU_Ceiling"]) {
-            orig_IORegistryEntrySetCFProperty(entry, propertyName, (__bridge CFTypeRef)@(15));
-            return KERN_SUCCESS; 
+            int val = 15;
+            CFNumberRef numRef = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &val);
+            kern_return_t res = orig_IORegistryEntrySetCFProperty(entry, propertyName, numRef);
+            CFRelease(numRef);
+            return res;
         }
     }
 
