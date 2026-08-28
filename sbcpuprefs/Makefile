@@ -11,9 +11,10 @@ SBCPUPrefs_FRAMEWORKS = UIKit
 SBCPUPrefs_PRIVATE_FRAMEWORKS = Preferences
 SBCPUPrefs_CFLAGS = -fobjc-arc
 
-# 🔴 核心修复：必须加回这一行！
-# Theos 在 Rootless 环境会自动把它转成 /var/jb/... 
-# 不加这行就会安装错位置，导致设置里找不到。
+# 🔴 安装路径
 SBCPUPrefs_INSTALL_PATH = /Library/PreferenceBundles
+# 🔴 强制声明主类，防止系统因为找不到代码而隐藏插件
+SBCPUPrefs_PRINCIPAL_CLASS = SBCPUPrefsRootListController
 
 include $(THEOS_MAKE_PATH)/bundle.mk
+
