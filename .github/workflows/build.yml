@@ -37,7 +37,7 @@ jobs:
           cp -R "iPhoneOS16.5.sdk" "$HOME/theos/sdks/"
 
       # =======================================================
-      # 👑 修复：加入了 preferenceloader 依赖，解决设置不显示的问题
+      # 🔴 核心修复2：加入了 preferenceloader 依赖
       # =======================================================
       - name: Generate Perfect Control File
         run: |
@@ -94,3 +94,4 @@ jobs:
         with:
           name: SBCPUFloating-V2.8
           path: build/*.deb
+
