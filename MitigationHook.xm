@@ -11,6 +11,12 @@
 static const int InsulationUnrestrictedPowerTarget = 65000;
 static int gNotifyToken = -1;
 
+// 👑 无比纯净的安全调用协议，告别内存 leak！
+@interface NSObject (SBCPUMitigationDummy)
++ (id)sharedInstance;
+- (void)updateCPU;
+@end
+
 typedef mach_port_t io_registry_entry_t;
 extern "C" kern_return_t IORegistryEntrySetCFProperty(io_registry_entry_t entry, CFStringRef propertyName, CFTypeRef property);
 
@@ -58,7 +64,6 @@ static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry
 
     // 🚀 [终极满血快充]：彻底突破 80% 优化充电与高温降流限制
     if (forceFastCharge) {
-        // 强势注入最高物理阈值，采用 CFNumberCreate 防止底层泄漏
         if ([propStr containsString:@"ChargeCurrent"] ||
             [propStr containsString:@"ChargeLimit"] ||
             [propStr containsString:@"MaxChargeCurrent"] ||
@@ -71,7 +76,6 @@ static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry
             return res;
         }
         
-        // 粉碎 iOS 原生的"优化电池充电 (OBC)" 休眠断流机制
         if ([propStr containsString:@"ChargeInhibit"] || 
             [propStr containsString:@"SmartCharge"] || 
             [propStr containsString:@"EnforceDisableOBC"]) {
@@ -180,16 +184,14 @@ static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry
             if (mode != 0) {
                 Class cls = objc_getClass("MitigationController");
                 if (cls) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                    id controller = [cls performSelector:NSSelectorFromString(@"sharedInstance")];
-                    if (controller && [controller respondsToSelector:NSSelectorFromString(@"updateCPU")]) {
-                        [controller performSelector:NSSelectorFromString(@"updateCPU")];
+                    id controller = [cls sharedInstance];
+                    if (controller) {
+                        [controller updateCPU];
                     }
-#pragma clang diagnostic pop
                 }
             }
         });
         dispatch_resume(timer);
     }
 }
+
