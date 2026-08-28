@@ -1,4 +1,4 @@
-
+```cpp
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 #import <notify.h>
@@ -200,3 +200,4 @@ static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry
     }
 }
 
+```
