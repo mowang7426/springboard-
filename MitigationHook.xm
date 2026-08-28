@@ -11,12 +11,6 @@
 static const int InsulationUnrestrictedPowerTarget = 65000;
 static int gNotifyToken = -1;
 
-@protocol SBCPUMitigationDummy <NSObject>
-@optional
-+ (id)sharedInstance;
-- (void)updateCPU;
-@end
-
 typedef mach_port_t io_registry_entry_t;
 extern "C" kern_return_t IORegistryEntrySetCFProperty(io_registry_entry_t entry, CFStringRef propertyName, CFTypeRef property);
 
@@ -64,7 +58,7 @@ static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry
 
     // 🚀 [终极满血快充]：彻底突破 80% 优化充电与高温降流限制
     if (forceFastCharge) {
-        // iOS 经常会在 70%、80% 或者发热时下发 500mA 的限流指令，直接拦截并覆写满功率
+        // 强势注入最高物理阈值，采用 CFNumberCreate 防止底层泄漏
         if ([propStr containsString:@"ChargeCurrent"] ||
             [propStr containsString:@"ChargeLimit"] ||
             [propStr containsString:@"MaxChargeCurrent"] ||
@@ -185,15 +179,17 @@ static kern_return_t hook_IORegistryEntrySetCFProperty(io_registry_entry_t entry
             NSInteger mode = getRealTimeMitigationMode();
             if (mode != 0) {
                 Class cls = objc_getClass("MitigationController");
-                if (cls && [cls respondsToSelector:@selector(sharedInstance)]) {
-                    id controller = [(id<SBCPUMitigationDummy>)cls sharedInstance];
-                    if (controller && [controller respondsToSelector:@selector(updateCPU)]) {
-                        [(id<SBCPUMitigationDummy>)controller updateCPU];
+                if (cls) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                    id controller = [cls performSelector:NSSelectorFromString(@"sharedInstance")];
+                    if (controller && [controller respondsToSelector:NSSelectorFromString(@"updateCPU")]) {
+                        [controller performSelector:NSSelectorFromString(@"updateCPU")];
                     }
+#pragma clang diagnostic pop
                 }
             }
         });
         dispatch_resume(timer);
     }
 }
-
