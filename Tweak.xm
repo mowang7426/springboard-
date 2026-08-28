@@ -82,6 +82,8 @@ typedef struct {
 @property (nonatomic, strong) NSDate *timestamp;
 @property (nonatomic, strong) id originalRequest;
 @end
+@implementation SBNotifReq
+@end
 
 // 🟢 补回丢失的 SBNotificationManager 声明
 @interface SBNotificationManager : NSObject
@@ -174,7 +176,7 @@ typedef struct {
 - (void)refreshAllDetailData;
 @end
 
-#pragma mark - 3. 全局状态变量与 C 函数前置声明
+#pragma mark - 3. 全局状态变量
 
 static UIWindow *cpuWindow = nil;
 static SBCPUFloatingView *floatingView = nil;
@@ -248,14 +250,44 @@ static BOOL hideContentOnLockScreen = NO;
 static NSInteger notificationDuration = 5;
 static NSMutableArray<SBNotifReq *> *historyNotifications = nil;
 
-// 🟢 函数前置声明，防止编译器报 undeclared identifier 和 unused function
+
+#pragma mark - 4. 👑 核心底层 C 函数前置声明（绝对不可删除，防报错护城河）
+
+static DeviceSpec MakeDeviceSpec(const char *platform, const char *modelName, const char *chipName, NSInteger cores, double maxFreqMHz, NSInteger designBatteryCapacity);
+static DeviceSpec getDeviceSpec(void);
+static BOOL getBoolPref(CFStringRef key, BOOL defaultVal);
+static float getFloatPref(CFStringRef key, float defaultVal);
+static NSInteger getIntPref(CFStringRef key, NSInteger defaultVal);
+static void setBoolPref(CFStringRef key, BOOL value);
+static void setFloatPref(CFStringRef key, float value);
+static void setIntPref(CFStringRef key, NSInteger value);
+static void applyVisibility(void);
 static void applyFloatingAlpha(void);
+static void LoadPreferences(void);
+static void SavePreferencesAndNotify(void);
+static void setHardwareChargingInhibit(BOOL inhibit);
+static void setForceFastChargeOverride(BOOL force);
+static NSString *getNetworkType(void);
+static NSDictionary *getRealBatteryDetails(void);
+static double getBatteryTemperatureInternal(void);
+static double getBatteryCurrentInternal(void);
+static BOOL isChargingInternal(void);
+static BOOL isDeviceOverheated(void);
+static double getSpringBoardCPUUsage(void);
+static double getTotalCPUUsage(void);
+static double getRealCPUFrequency(double currentCpuUsage);
+static UIWindowScene *getWindowScene(void);
+static UIInterfaceOrientation getActiveInterfaceOrientation(void);
+static void clampAndPositionFloatingView(CGPoint targetCenter, BOOL animate);
 static void updateFloatingSize(void);
+static void createCPUWindow(void);
 static void openDetailView(void);
 static void openSettings(void);
+static void checkHighCPU(double cpu);
+static void updateCPU(void);
 static void applySystemRefreshRate(void);
 
-#pragma mark - 4. 底层 C 函数实现
+#pragma mark - 5. 底层 C 函数实现
 
 static DeviceSpec MakeDeviceSpec(const char *platform, const char *modelName, const char *chipName, NSInteger cores, double maxFreqMHz, NSInteger designBatteryCapacity) {
     DeviceSpec spec;
@@ -403,7 +435,7 @@ static void LoadPreferences(void) {
         } else {
             [[SBCPUFPSHelper sharedInstance] stopMonitoring];
         }
-        applySystemRefreshRate(); // 🟢 补回刷新率应用
+        applySystemRefreshRate(); 
         int token;
         if (notify_register_check(NOTIFY_CPU_MODE, &token) == NOTIFY_STATUS_OK) {
             uint64_t state = (insulationCpuMode & 0xFF) | ((blockThermalDimming ? 1ULL : 0) << 8) | ((forceFastChargeEnable ? 1ULL : 0) << 9);
@@ -461,7 +493,7 @@ static void SavePreferencesAndNotify(void) {
     } else {
         [[SBCPUFPSHelper sharedInstance] stopMonitoring];
     }
-    applySystemRefreshRate(); // 🟢 补回刷新率应用
+    applySystemRefreshRate(); 
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), kPrefChangedNotification, NULL, NULL, YES);
     
     if ([[NSProcessInfo processInfo].processName isEqualToString:@"SpringBoard"]) {
@@ -493,7 +525,7 @@ static void setForceFastChargeOverride(BOOL force) {
     io_service_t managerService = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBatteryManager"));
     if (managerService) {
         IORegistryEntrySetCFProperty(managerService, CFSTR("SmartChargingAppOverride"), kCFBooleanTrue);
-        IORegistryEntrySetCFProperty(managerService, CFSTR("SmartChargingOverride"), kCFBooleanTrue); // 彻底关闭 OBC 优化充电
+        IORegistryEntrySetCFProperty(managerService, CFSTR("SmartChargingOverride"), kCFBooleanTrue); 
         IOObjectRelease(managerService);
     }
     io_service_t batService = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBattery"));
@@ -994,7 +1026,7 @@ static void applySystemRefreshRate(void) {
     [[SBCPUFPSHelper sharedInstance] updateFrameRate];
 }
 
-#pragma mark - 5. Notification Manager 实现
+#pragma mark - 6. Notification Manager 实现
 
 @implementation SBNotificationManager
 + (instancetype)sharedInstance {
@@ -1186,7 +1218,6 @@ static void applySystemRefreshRate(void) {
         pan.delegate = self;
         [self addGestureRecognizer:pan];
 
-        // 🟢 使用 self.xxx 安全赋值，避免编译器报错
         self.singleTapGesture = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleSingleTap:)];
         self.singleTapGesture.delegate = self;
         [self addGestureRecognizer:self.singleTapGesture];
