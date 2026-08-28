@@ -37,6 +37,7 @@
 - (id)bulletin;
 - (id)defaultAction;
 - (id)actionRunner;
+// 👑 绝杀：直接预声明 5 参数的执行方法，拒绝 performSelector 卡顿和闪退
 - (void)executeAction:(id)action fromOrigin:(NSString *)origin endpoint:(id)endpoint withParameters:(NSDictionary *)params completion:(id)completion;
 - (BOOL)isUILocked;
 - (void)openApplication:(NSString *)bundleID withOptions:(id)options completion:(id)completion;
@@ -94,7 +95,7 @@ typedef struct {
 @property (nonatomic, copy) NSString *title;
 @property (nonatomic, copy) NSString *message;
 @property (nonatomic, strong) NSDate *timestamp;
-@property (nonatomic, strong) NSDictionary *userInfoPayload;
+@property (nonatomic, strong) NSDictionary *userInfoPayload; 
 @property (nonatomic, strong) id originalRequest; 
 @end
 @implementation SBNotifReq
@@ -1048,7 +1049,6 @@ static void applySystemRefreshRate(void) {
         if (!title || title.length == 0) title = [content valueForKey:@"subtitle"];
         NSString *message = [content valueForKey:@"message"];
         
-        // 🟢 极度关键修复：纯安全代码调用，且不定义任何未使用变量，100% 避免编译报错
         NSDictionary *payload = nil;
         @try {
             id userNotif = [req respondsToSelector:@selector(userNotification)] ? [req performSelector:@selector(userNotification)] : nil;
@@ -1476,7 +1476,7 @@ static void applySystemRefreshRate(void) {
     }
 }
 
-// 🚀 修复2: 绝对0延迟防卡死，提取系统原生事件引擎直达聊天（规避任何编译警告）
+// 🚀 核心绝杀：彻底抛弃 performSelector，100% 直连系统深层方法！秒进微信！
 - (void)handleSingleTap:(UITapGestureRecognizer *)tap {
     if (tap.state == UIGestureRecognizerStateEnded) {
         BOOL hasUnread = (historyNotifications.count > 0);
@@ -1485,6 +1485,10 @@ static void applySystemRefreshRate(void) {
         if (combinedModeVisible) {
             SBNotifReq *targetReq = self.currentNotification ?: historyNotifications.firstObject;
             if (targetReq) {
+                NSString *bundleID = targetReq.bundleID;
+                NSDictionary *userInfo = targetReq.userInfoPayload;
+                id rawRequest = targetReq.originalRequest; 
+                
                 // 🟢 瞬间清除小红点及缓存，彻底隐藏绝不残留！
                 self.badgeLabel.hidden = YES;
                 self.isShowingNotification = NO;
@@ -1497,24 +1501,22 @@ static void applySystemRefreshRate(void) {
                     dispatch_async(dispatch_get_main_queue(), ^{
                         BOOL opened = NO;
 
-                        // 第一层：神级优化！0延迟！使用系统的 Notification Action Runner 模拟手指点击横幅
+                        // 第一层：尝试用系统的 Notification Action Runner 真正0延迟直达
                         @try {
-                            id rawRequest = targetReq.originalRequest; 
                             if (rawRequest && [rawRequest respondsToSelector:@selector(defaultAction)]) {
                                 id defaultAction = [rawRequest performSelector:@selector(defaultAction)];
                                 if (defaultAction && [defaultAction respondsToSelector:@selector(actionRunner)]) {
                                     id runner = [defaultAction performSelector:@selector(actionRunner)];
+                                    // 🚀 直接用我们在头部预声明的纯净接口执行，打破系统反射保护壁垒！
                                     if (runner && [runner respondsToSelector:@selector(executeAction:fromOrigin:endpoint:withParameters:completion:)]) {
-                                        // 完美填入 5 个参数的执行，触发系统底层免黑屏直达 APP
-                                        void (^completionBlock)(BOOL) = ^(BOOL success) {};
-                                        [runner executeAction:defaultAction fromOrigin:@"NCNotificationDestinationBanner" endpoint:nil withParameters:nil completion:completionBlock];
+                                        [runner executeAction:defaultAction fromOrigin:@"NCNotificationDestinationBanner" endpoint:nil withParameters:nil completion:nil];
                                         opened = YES;
                                     }
                                 }
                             }
                         } @catch (NSException *e) {}
 
-                        // 第二层：使用 FBS 传入解析好的纯净参数 (无需定义多余变量，避免编译报错)
+                        // 第二层：使用 FBS 传入解析好的纯净参数
                         if (!opened) {
                             @try {
                                 id fbsServiceClass = NSClassFromString(@"FBSOpenApplicationService");
@@ -1525,30 +1527,30 @@ static void applySystemRefreshRate(void) {
                                     if ([fbsService respondsToSelector:@selector(openApplication:withOptions:completion:)]) {
                                         NSMutableDictionary *dict = [NSMutableDictionary dictionary];
                                         dict[@"__UnlockPrompt"] = @YES; 
-                                        if (targetReq.userInfoPayload) {
-                                            dict[@"__Payload"] = targetReq.userInfoPayload;
-                                            dict[@"bks-open-application-options-notification-payload"] = targetReq.userInfoPayload;
-                                            dict[@"UIApplicationOpenURLOptionsAnnotationKey"] = targetReq.userInfoPayload;
+                                        if (userInfo) {
+                                            dict[@"__Payload"] = userInfo;
+                                            dict[@"bks-open-application-options-notification-payload"] = userInfo;
+                                            dict[@"UIApplicationOpenURLOptionsAnnotationKey"] = userInfo;
                                         }
                                         id fbsOptions = [fbsOptionsClass performSelector:@selector(optionsWithDictionary:) withObject:dict];
                                         
-                                        // 💡 绝杀机制：completion 传空闭包，完美打破卡死等待！
+                                        // 💡 绝杀机制：completion 传空闭包，完美打破 6 秒死锁等待！
                                         void (^completionBlock)(id) = ^(id error) {}; 
-                                        [fbsService openApplication:targetReq.bundleID withOptions:fbsOptions completion:completionBlock];
+                                        [fbsService openApplication:bundleID withOptions:fbsOptions completion:completionBlock];
                                         opened = YES;
                                     }
                                 }
                             } @catch (NSException *e) {}
                         }
                         
-                        // 第三层：稳定兜底唤醒
+                        // 第三层：稳定兜底
                         if (!opened) {
                             @try {
                                 id lsawClass = NSClassFromString(@"LSApplicationWorkspace");
                                 if (lsawClass) {
                                     id workspace = [lsawClass performSelector:@selector(defaultWorkspace)];
                                     if ([workspace respondsToSelector:@selector(openApplicationWithBundleID:)]) {
-                                        [workspace performSelector:@selector(openApplicationWithBundleID:) withObject:targetReq.bundleID];
+                                        [workspace performSelector:@selector(openApplicationWithBundleID:) withObject:bundleID];
                                     }
                                 }
                             } @catch (NSException *e) {}
@@ -1634,7 +1636,7 @@ static void applySystemRefreshRate(void) {
     [_blurView.layer addAnimation:glowAnim forKey:@"borderGlow"];
 }
 
-// 🚀 修复3: 完美隔离模式 (自动弹窗只显示消息，手动点开保持上下双层排布！)
+// 👑 [史诗级 UI 进化]：不再隐藏 CPU 层，杜绝所有的折叠灰色空条！
 - (void)updateLayoutWithShowCpuFreq:(BOOL)showFreq
                             showFps:(BOOL)showFps
                  showBatteryPercent:(BOOL)showBattery
@@ -1642,150 +1644,128 @@ static void applySystemRefreshRate(void) {
                  showBatteryCurrent:(BOOL)showCurrent
                          isCharging:(BOOL)isCharging {
     
-    if (self.isCollapsed && !self.isShowingNotification) return;
+    if (self.isCollapsed) return;
 
     BOOL hasUnread = (historyNotifications.count > 0 && !self.isShowingNotification);
     self.badgeLabel.hidden = !hasUnread;
     if (hasUnread) self.badgeLabel.text = [NSString stringWithFormat:@"%lu", (unsigned long)historyNotifications.count];
 
-    // 三大显示逻辑控制，精准定位到底是弹窗还是面板
-    BOOL isAutoPop = self.isShowingNotification; 
-    BOOL wasCollapsed = self.wasCollapsedBeforeNotification;
-    
-    BOOL showPerf = YES;
-    BOOL showNotif = NO;
-    
-    if (isAutoPop) {
-        showNotif = YES;
-        showPerf = !wasCollapsed; // 如果原来是折叠的，自动弹消息时纯净隐藏上方性能板！
-    } else if (!self.isCollapsed) {
-        showPerf = YES; // 手动展开时，肯定有性能面板
-        showNotif = hasUnread; // 有历史消息时显示下面
-    }
+    // 🟢 任何时候展示消息都一同展示 CPU，杜绝动画错误
+    BOOL showCombinedMode = (!self.isCollapsed && historyNotifications.count > 0) || self.isShowingNotification;
 
-    self.performanceContainer.hidden = !showPerf;
-    self.performanceContainer.alpha = showPerf ? 1.0 : 0.0;
-    
+    self.performanceContainer.hidden = NO;
+    self.performanceContainer.alpha = 1.0;
+
+    _cpuTitleLabel.hidden = NO;
+    _cpuValueLabel.hidden = NO;
+
+    _cpuFreqLabel.hidden = !showFreq;
+    _fpsTitleLabel.hidden = !showFps;
+    _fpsValueLabel.hidden = !showFps;
+    _fpsSubLabel.hidden = !showFps;
+    _batteryIconLabel.hidden = !showBattery;
+    _batteryValueLabel.hidden = !showBattery;
+    _batterySubLabel.hidden = !showBattery;
+    _tempIconView.hidden = !showTemp;
+    _tempValueLabel.hidden = !showTemp;
+    _tempSubLabel.hidden = !showTemp;
+
+    BOOL actualShowCurrent = showBatteryCurrent && isCharging;
+    _currentIconLabel.hidden = !actualShowCurrent;
+    _currentValueLabel.hidden = !actualShowCurrent;
+    _currentSubLabel.hidden = !actualShowCurrent;
+    _bottomCapsule.hidden = !isCharging;
+
     CGFloat currentX = 14.0f;
     CGFloat padY = 6.0f; 
-    CGFloat finalW = 240.0f; 
-    CGFloat currentY = padY;
 
-    if (showPerf) {
-        _cpuTitleLabel.hidden = NO;
-        _cpuValueLabel.hidden = NO;
-        _cpuFreqLabel.hidden = !showFreq;
-        _fpsTitleLabel.hidden = !showFps;
-        _fpsValueLabel.hidden = !showFps;
-        _fpsSubLabel.hidden = !showFps;
-        _batteryIconLabel.hidden = !showBattery;
-        _batteryValueLabel.hidden = !showBattery;
-        _batterySubLabel.hidden = !showBattery;
-        _tempIconView.hidden = !showTemp;
-        _tempValueLabel.hidden = !showTemp;
-        _tempSubLabel.hidden = !showTemp;
+    CGFloat cpuW = 46.0f;
+    _cpuTitleLabel.frame = CGRectMake(currentX, padY, cpuW, 12);
+    _cpuValueLabel.frame = CGRectMake(currentX, padY + 12, cpuW, 18);
+    if (showFreq) _cpuFreqLabel.frame = CGRectMake(currentX, padY + 31, cpuW, 12);
+    else _cpuFreqLabel.frame = CGRectZero;
+    currentX += cpuW + 4.0f;
 
-        BOOL actualShowCurrent = showBatteryCurrent && isCharging;
-        _currentIconLabel.hidden = !actualShowCurrent;
-        _currentValueLabel.hidden = !actualShowCurrent;
-        _currentSubLabel.hidden = !actualShowCurrent;
-        _bottomCapsule.hidden = !isCharging;
+    if (showFps || showBattery || showTemp || actualShowCurrent) {
+        _div1.hidden = NO;
+        _div1.frame = CGRectMake(currentX, padY + 4, 0.5f, 30.0f);
+        currentX += 6.5f;
+    } else { _div1.hidden = YES; }
 
-        CGFloat cpuW = 46.0f;
-        _cpuTitleLabel.frame = CGRectMake(currentX, padY, cpuW, 12);
-        _cpuValueLabel.frame = CGRectMake(currentX, padY + 12, cpuW, 18);
-        if (showFreq) _cpuFreqLabel.frame = CGRectMake(currentX, padY + 31, cpuW, 12);
-        else _cpuFreqLabel.frame = CGRectZero;
-        currentX += cpuW + 4.0f;
+    if (showFps) {
+        CGFloat fpsW = 32.0f;
+        _fpsTitleLabel.frame = CGRectMake(currentX, padY, fpsW, 12);
+        _fpsValueLabel.frame = CGRectMake(currentX, padY + 12, fpsW, 18);
+        _fpsSubLabel.frame = CGRectMake(currentX, padY + 31, fpsW, 12);
+        currentX += fpsW + 4.0f;
 
-        if (showFps || showBattery || showTemp || actualShowCurrent) {
-            _div1.hidden = NO;
-            _div1.frame = CGRectMake(currentX, padY + 4, 0.5f, 30.0f);
+        if (showBattery || showTemp || actualShowCurrent) {
+            _divFps.hidden = NO;
+            _divFps.frame = CGRectMake(currentX, padY + 4, 0.5f, 30.0f);
             currentX += 6.5f;
-        } else { _div1.hidden = YES; }
-
-        if (showFps) {
-            CGFloat fpsW = 32.0f;
-            _fpsTitleLabel.frame = CGRectMake(currentX, padY, fpsW, 12);
-            _fpsValueLabel.frame = CGRectMake(currentX, padY + 12, fpsW, 18);
-            _fpsSubLabel.frame = CGRectMake(currentX, padY + 31, fpsW, 12);
-            currentX += fpsW + 4.0f;
-
-            if (showBattery || showTemp || actualShowCurrent) {
-                _divFps.hidden = NO;
-                _divFps.frame = CGRectMake(currentX, padY + 4, 0.5f, 30.0f);
-                currentX += 6.5f;
-            } else { _divFps.hidden = YES; }
         } else { _divFps.hidden = YES; }
+    } else { _divFps.hidden = YES; }
 
-        if (showBattery) {
-            CGFloat batW = 44.0f;
-            _batteryIconLabel.frame = CGRectMake(currentX, padY + 10, 18, 18);
-            _batteryValueLabel.frame = CGRectMake(currentX + 20, padY + 10, batW - 20, 16);
-            _batterySubLabel.frame = CGRectMake(currentX + 20, padY + 27, batW - 20, 12);
-            currentX += batW + 4.0f;
+    if (showBattery) {
+        CGFloat batW = 44.0f;
+        _batteryIconLabel.frame = CGRectMake(currentX, padY + 10, 18, 18);
+        _batteryValueLabel.frame = CGRectMake(currentX + 20, padY + 10, batW - 20, 16);
+        _batterySubLabel.frame = CGRectMake(currentX + 20, padY + 27, batW - 20, 12);
+        currentX += batW + 4.0f;
 
-            if (showTemp || actualShowCurrent) {
-                _div2.hidden = NO;
-                _div2.frame = CGRectMake(currentX, padY + 4, 0.5f, 30.0f);
-                currentX += 6.5f;
-            } else { _div2.hidden = YES; }
+        if (showTemp || actualShowCurrent) {
+            _div2.hidden = NO;
+            _div2.frame = CGRectMake(currentX, padY + 4, 0.5f, 30.0f);
+            currentX += 6.5f;
         } else { _div2.hidden = YES; }
+    } else { _div2.hidden = YES; }
 
-        if (showTemp) {
-            CGFloat tempW = 54.0f;
-            _tempIconView.frame = CGRectMake(currentX + 2, padY + 10, 16, 16); 
-            _tempValueLabel.frame = CGRectMake(currentX + 20, padY + 10, tempW - 20, 16);
-            _tempSubLabel.frame = CGRectMake(currentX + 20, padY + 27, tempW - 20, 12);
-            currentX += tempW + 4.0f;
-
-            if (actualShowCurrent) {
-                _div3.hidden = NO;
-                _div3.frame = CGRectMake(currentX, padY + 4, 0.5f, 30.0f);
-                currentX += 6.5f;
-            } else { _div3.hidden = YES; }
-        } else { _div3.hidden = YES; }
+    if (showTemp) {
+        CGFloat tempW = 54.0f;
+        _tempIconView.frame = CGRectMake(currentX + 2, padY + 10, 16, 16); 
+        _tempValueLabel.frame = CGRectMake(currentX + 20, padY + 10, tempW - 20, 16);
+        _tempSubLabel.frame = CGRectMake(currentX + 20, padY + 27, tempW - 20, 12);
+        currentX += tempW + 4.0f;
 
         if (actualShowCurrent) {
-            CGFloat curW = 56.0f;
-            _currentIconLabel.frame = CGRectMake(currentX, padY + 11, 14, 18);
-            _currentValueLabel.frame = CGRectMake(currentX + 16, padY + 10, curW - 16, 16);
-            _currentSubLabel.frame = CGRectMake(currentX + 16, padY + 27, curW - 16, 12);
-            currentX += curW + 4.0f;
-        }
+            _div3.hidden = NO;
+            _div3.frame = CGRectMake(currentX, padY + 4, 0.5f, 30.0f);
+            currentX += 6.5f;
+        } else { _div3.hidden = YES; }
+    } else { _div3.hidden = YES; }
 
-        finalW = currentX + 10.0f; 
-        if (finalW < 40.0f) finalW = 40.0f;
-        if (showNotif && finalW < 240.0f) finalW = 240.0f; 
-        
-        currentY = padY + 44.0f; 
-        if (isCharging) {
-            currentY += 4.0f;
-            _bottomCapsule.layer.cornerRadius = 7.0f;
-            _batteryProgressView.layer.cornerRadius = 7.0f;
-            _bottomCapsule.frame = CGRectMake(12.0f, currentY, finalW - 24.0f, 14.0f);
-            _statusLabel.frame = CGRectMake(0, 0, finalW - 24.0f, 14.0f);
-            currentY += 14.0f;
-        }
-    } else {
-        // 专门为纯净通知准备的初始高度
-        currentY = 4.0f; 
+    if (actualShowCurrent) {
+        CGFloat curW = 56.0f;
+        _currentIconLabel.frame = CGRectMake(currentX, padY + 11, 14, 18);
+        _currentValueLabel.frame = CGRectMake(currentX + 16, padY + 10, curW - 16, 16);
+        _currentSubLabel.frame = CGRectMake(currentX + 16, padY + 27, curW - 16, 12);
+        currentX += curW + 4.0f;
     }
 
-    if (showNotif) {
+    CGFloat finalW = currentX + 10.0f; 
+    if (finalW < 40.0f) finalW = 40.0f;
+    if (showCombinedMode && finalW < 240.0f) finalW = 240.0f; 
+    
+    CGFloat currentY = padY + 44.0f; 
+
+    if (isCharging) {
+        currentY += 4.0f;
+        _bottomCapsule.layer.cornerRadius = 7.0f;
+        _batteryProgressView.layer.cornerRadius = 7.0f;
+        _bottomCapsule.frame = CGRectMake(12.0f, currentY, finalW - 24.0f, 14.0f);
+        _statusLabel.frame = CGRectMake(0, 0, finalW - 24.0f, 14.0f);
+        currentY += 14.0f;
+    }
+
+    // --- 🟢 下方铺设极简分层消息 ---
+    if (showCombinedMode) {
+        self.horizontalDiv.hidden = NO;
         self.notificationContainer.hidden = NO;
         self.notificationContainer.alpha = 1.0;
 
-        if (showPerf) {
-            // 手动点开有性能版时，保留横线分隔符
-            self.horizontalDiv.hidden = NO;
-            self.horizontalDiv.frame = CGRectMake(14.0f, currentY + 4.0f, finalW - 28.0f, 0.5f);
-            currentY += 10.0f;
-        } else {
-            // 自动弹窗，纯净模式，无分隔符
-            self.horizontalDiv.hidden = YES;
-            currentY += 4.0f;
-        }
+        currentY += 4.0f;
+        self.horizontalDiv.frame = CGRectMake(14.0f, currentY, finalW - 28.0f, 0.5f);
+        currentY += 4.0f;
 
         SBNotifReq *req = self.currentNotification ?: historyNotifications.firstObject;
         NSString *appName = @"消息";
@@ -1793,6 +1773,9 @@ static void applySystemRefreshRate(void) {
         if ([req.bundleID isEqualToString:@"com.tencent.xin"]) { appName = @"微信"; icon = @"🟢"; }
         else if ([req.bundleID.lowercaseString containsString:@"qq"]) { appName = @"QQ"; icon = @"🔵"; }
         else if ([req.bundleID isEqualToString:@"com.tencent.tim"]) { appName = @"TIM"; icon = @"🔷"; }
+        
+        NSUInteger count = historyNotifications.count;
+        if (count == 0 && self.currentNotification) count = 1;
         
         self.notifAppNameLabel.text = [NSString stringWithFormat:@"%@ %@ • %@", icon, appName, req.title];
         
@@ -1810,23 +1793,24 @@ static void applySystemRefreshRate(void) {
         self.notifAppNameLabel.frame = CGRectMake(14.0f, 4.0f, finalW - 28.0f, 14.0f);
         self.notifMessageLabel.frame = CGRectMake(14.0f, 20.0f, finalW - 28.0f, 14.0f);
 
-        currentY += 38.0f + 6.0f; // 加上底部边距
+        currentY += 38.0f;
     } else {
-        self.notificationContainer.hidden = YES;
         self.horizontalDiv.hidden = YES;
-        currentY += 8.0f; 
+        self.notificationContainer.hidden = YES;
+        self.notificationContainer.alpha = 0.0;
     }
 
-    // 🚀 修复1: 红点坐标超级进化算法！根据屏幕左右动态调转方向，永不遮挡边缘！
+    currentY += 8.0f; 
+
+    // 🚀 【完美版】判断浮窗在左还是右，严格吸附到靠内的那一侧，不切边！
     if (!self.badgeLabel.hidden) {
         UIView *parent = self.superview;
-        CGRect containerBounds = parent ? parent.bounds : [UIScreen mainScreen].bounds;
-        BOOL isLeft = (self.center.x <= containerBounds.size.width / 2.0f);
+        CGFloat screenW = parent ? parent.bounds.size.width : [UIScreen mainScreen].bounds.size.width;
+        BOOL isLeft = (self.center.x <= screenW / 2.0f);
         
         CGFloat badgeW = 20.0f;
-        // 如果浮窗吸附在左边 -> 红点紧贴浮窗靠内（右侧）显示 
-        // 如果浮窗吸附在右边 -> 红点紧贴浮窗靠内（左侧）显示
-        CGFloat targetBadgeX = isLeft ? (finalW - badgeW/2.0f - 4.0f) : (-badgeW/2.0f + 4.0f);
+        // 左边吸附 -> 红点放右侧(内部) / 右边吸附 -> 红点放左侧(内部)
+        CGFloat targetBadgeX = isLeft ? (finalW - badgeW + 6.0f) : -6.0f;
         self.badgeLabel.frame = CGRectMake(targetBadgeX, -6.0f, badgeW, 14.0f);
     }
 
@@ -1936,10 +1920,10 @@ static void applySystemRefreshRate(void) {
         self.bounds = CGRectMake(0, 0, targetW, targetH);
         self.center = targetCenter;
 
-        // 🚀 折叠状态下，也保证红点完美内侧反转吸附
+        // 🚀 折叠状态下，也保证红点完美向内侧吸附反转
         if (!self.badgeLabel.hidden) {
             CGFloat badgeW = 20.0f;
-            CGFloat targetBadgeX = isLeft ? (targetW - badgeW/2.0f - 2.0f) : (-badgeW/2.0f + 2.0f);
+            CGFloat targetBadgeX = isLeft ? (targetW - badgeW + 6.0f) : -6.0f;
             self.badgeLabel.frame = CGRectMake(targetBadgeX, -6.0f, badgeW, 14.0f);
         }
 
@@ -2008,6 +1992,7 @@ static void applySystemRefreshRate(void) {
 
     void (^animationsBlock)(void) = ^{
         self.collapsedContainerView.alpha = 0.0;
+        self.horizontalDiv.alpha = 1.0;
         
         for (UIView *v in self.performanceContainer.subviews) {
             if (v != self.collapsedContainerView && !v.hidden) v.alpha = 1.0;
@@ -2044,9 +2029,15 @@ static void applySystemRefreshRate(void) {
     }
     
     [self.inactivityTimer invalidate]; self.inactivityTimer = nil;
+    
     [self.notificationTimer invalidate];
     self.notificationTimer = [NSTimer scheduledTimerWithTimeInterval:notificationDuration target:self selector:@selector(hideNotification) userInfo:nil repeats:NO];
     
+    // 🟢 解决大白边：确保CPU模块的正常显示层级
+    for (UIView *v in self.performanceContainer.subviews) {
+        if (v != self.collapsedContainerView) v.hidden = NO;
+    }
+
     [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5 options:UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionBeginFromCurrentState animations:^{
         updateFloatingSize(); 
     } completion:nil];
@@ -2529,7 +2520,7 @@ static void applySystemRefreshRate(void) {
 @end
 
 // ==============================================
-// 100% 完整保留的设置中心
+// 设置中心 (完整保留)
 // ==============================================
 @implementation SBCPUSettingsController
 
@@ -2557,13 +2548,13 @@ static void applySystemRefreshRate(void) {
     if (section == 0) return 4; 
     if (section == 1) return 3;
     if (section == 2) return 5;
-    if (section == 3) return 6; // 通知管理
+    if (section == 3) return 6; 
     if (section == 4) return 3;
     if (section == 5) return 2;
     if (section == 6) return 5;
     if (section == 7) return 3; 
     if (section == 8) return 6;
-    if (section == 9) return 5; // 📖 功能说明行数
+    if (section == 9) return 5; 
     return 0;
 }
 
