@@ -11,6 +11,9 @@ SBCPUPrefs_FRAMEWORKS = UIKit
 SBCPUPrefs_PRIVATE_FRAMEWORKS = Preferences
 SBCPUPrefs_CFLAGS = -fobjc-arc
 
-# 去掉了硬编码的安装路径，让 RootHide/Rootless Theos 自动决定存放位置
-include $(THEOS_MAKE_PATH)/bundle.mk
+# 🔴 核心修复：必须加回这一行！
+# Theos 在 Rootless 环境会自动把它转成 /var/jb/... 
+# 不加这行就会安装错位置，导致设置里找不到。
+SBCPUPrefs_INSTALL_PATH = /Library/PreferenceBundles
 
+include $(THEOS_MAKE_PATH)/bundle.mk
