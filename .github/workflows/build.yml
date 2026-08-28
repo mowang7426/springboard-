@@ -37,7 +37,7 @@ jobs:
           cp -R "iPhoneOS16.5.sdk" "$HOME/theos/sdks/"
 
       # =======================================================
-      # 👑 终极杀招：直接在云端动态生成 control，无视任何本地格式错误
+      # 👑 修复：加入了 preferenceloader 依赖，解决设置不显示的问题
       # =======================================================
       - name: Generate Perfect Control File
         run: |
@@ -51,8 +51,7 @@ jobs:
           Author: MoWang
           Description: SpringBoard CPU Monitor and Notification Manager
           Section: Tweaks
-          Depends: mobilesubstrate
-          
+          Depends: mobilesubstrate, preferenceloader
           EOF
           echo "✅ Control file successfully generated!"
           cat -e control
@@ -95,4 +94,3 @@ jobs:
         with:
           name: SBCPUFloating-V2.8
           path: build/*.deb
-
